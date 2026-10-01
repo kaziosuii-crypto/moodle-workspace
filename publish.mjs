@@ -47,7 +47,7 @@ if (REPO.github.user && ghToken) {
   const made = await api('https://api.github.com/user/repos', { method: 'POST', headers: head,
     body: JSON.stringify({ name: r, description: 'Moodle 编程工作区（油猴脚本）', private: false, has_issues: true, auto_init: false }) });
   console.log('github repo: ' + (made.ok ? 'created' : made.status === 422 ? 'already exists' : 'FAILED ' + JSON.stringify(made.body).slice(0, 200)));
-  git(['push', '--force', 'https://' + u + ':' + ghToken + '@github.com/' + u + '/' + r + '.git', 'HEAD:main']);
+  git(['push', '--quiet', '--force', 'https://' + u + ':' + ghToken + '@github.com/' + u + '/' + r + '.git', 'HEAD:main']);
   console.log('github: https://github.com/' + u + '/' + r);
 } else console.log('github: skipped (need REPO.github.user and GITHUB_TOKEN)');
 
@@ -59,7 +59,7 @@ if (REPO.gitee.user && gtToken) {
     body: JSON.stringify({ access_token: gtToken, name: r, description: 'Moodle 编程工作区（油猴脚本）', private: false, has_issues: true, auto_init: false }) });
   const exists = /已存在|already|has already/.test(JSON.stringify(made.body));
   console.log('gitee repo: ' + (made.ok ? 'created' : exists ? 'already exists' : 'FAILED ' + JSON.stringify(made.body).slice(0, 200)));
-  git(['push', '--force', 'https://' + u + ':' + gtToken + '@gitee.com/' + u + '/' + r + '.git', 'HEAD:master']);
+  git(['push', '--quiet', '--force', 'https://' + u + ':' + gtToken + '@gitee.com/' + u + '/' + r + '.git', 'HEAD:master']);
   console.log('gitee: https://gitee.com/' + u + '/' + r);
 } else console.log('gitee: skipped (need REPO.gitee.user and GITEE_TOKEN)');
 

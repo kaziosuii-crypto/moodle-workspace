@@ -9,6 +9,6 @@
  */
 export const REPO = {
   author: 'Ziheng',
-  github: { user: '', repo: 'moodle-workspace' },
-  gitee:  { user: '', repo: 'moodle-workspace' }
+  github: { user: 'kaziosuii-crypto', repo: 'moodle-workspace' },
+  gitee:  { user: 'Latmil', repo: 'moodle-workspace' }
 };
