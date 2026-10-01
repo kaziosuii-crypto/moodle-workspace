@@ -225,7 +225,7 @@ function saveDraft() {
   const original=document.querySelector('textarea[name=code]#edit-code');
   if(original?.form?.querySelector('[name=a]')?.value===current.id)original.value=current.draft.code;
   const ok=persist(draftKey(current.id),current.draft);
-  $('[data-save]').textContent=ok?'已存储':(storageBlocked()?'浏览器禁止了站点数据（草稿与密钥无法保存）':'浏览器存储已写满（草稿未保存）');
+  $('[data-save]').textContent=ok?'已存储':(storageBlocked()?'浏览器禁止了站点数据（草稿与密钥无法保存）':'草稿未能保存（浏览器存储不可用）');
 }
 function setBusy(value) {
   busy=value;
@@ -1025,7 +1025,10 @@ const RUN_TIMEOUT_MS=6000;
 let cSandbox=null;
 function openSandbox(){
   const url=URL.createObjectURL(new Blob([SANDBOX_SOURCE],{type:'text/javascript'}));
-  const worker=new Worker(url,{type:'module'});
+  // A module worker is refused on this page: creating one throws
+  // "Module scripts don't support importScripts()" before any of our code runs,
+  // even with an empty body. A classic worker supports dynamic import() and works.
+  const worker=new Worker(url);
   const pending=new Map();let seq=0;
   const failAll=message=>{
     for(const [id,entry] of pending){pending.delete(id);clearTimeout(entry.timer);entry.reject(new Error(message));}
