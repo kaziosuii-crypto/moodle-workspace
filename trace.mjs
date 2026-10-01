@@ -61,9 +61,14 @@ export function declarationsIn(line) {
   for (const part of splitTop(rest, ',')) {
     const name = part.match(/^\s*([A-Za-z_]\w*)\s*(?:\[(\s*\d*\s*)\])?/);
     if (!name) continue;
-    const size = name[2] === undefined ? 0 : Math.min(Number(name[2].trim()) || 0, 8);
-    if (name[2] !== undefined) out.push({ name: name[1], kind: base.kind === 'c' ? 's' : base.kind, fmt: base.kind === 'c' ? '%.40s' : base.fmt, size });
-    else out.push({ name: name[1], kind: base.kind, fmt: base.fmt, size: 0 });
+    const tail = part.slice(name[0].length);
+    if (name[2] !== undefined) {
+      // "int arr[]" has no known length, and "int grid[2][3]" would print the
+      // inner row (a pointer) as a number. Both are dropped rather than guessed.
+      if (!name[2].trim()) continue;
+      if (/^\s*\[/.test(tail)) continue;
+      out.push({ name: name[1], kind: base.kind === 'c' ? 's' : base.kind, fmt: base.kind === 'c' ? '%.40s' : base.fmt, size: Math.min(Number(name[2].trim()) || 0, 8) });
+    } else out.push({ name: name[1], kind: base.kind, fmt: base.fmt, size: 0 });
   }
   return out;
 }
@@ -71,6 +76,9 @@ export function declarationsIn(line) {
 /** "int a" -> one printable field per name, arrays expanded element by element. */
 function fieldsOf(variable) {
   if (!variable.size) return [{ label: variable.name, expr: variable.name, kind: variable.kind, fmt: variable.fmt }];
+  // A char array is one string. Expanding it would print each element with %s,
+  // i.e. dereference a char as a pointer.
+  if (variable.kind === 's') return [{ label: variable.name, expr: variable.name, kind: 's', fmt: '%.40s' }];
   const fields = [];
   for (let i = 0; i < variable.size; i++) {
     fields.push({ label: variable.name + '[' + i + ']', expr: variable.name + '[' + i + ']', kind: variable.kind, fmt: variable.fmt });
@@ -94,6 +102,23 @@ function marker(line, scope) {
 }
 
 /** "int isPrime(int n) {" -> return type, name, parameter list. */
+function structuralOf(line) {
+  let out = '', i = 0, init = -1, quote = '';
+  while (i < line.length) {
+    const c = line[i];
+    if (quote) { out += c; if (c === '\\') { i += 2; continue; } if (c === quote) quote = ''; i++; continue; }
+    if (c === '"' || c === "'") { quote = c; out += c; i++; continue; }
+    if (init >= 0) {
+      if (c === '{') init++;
+      else if (c === '}' && --init === 0) { out += '0'; init = -1; i++; continue; }
+      i++; continue;
+    }
+    if (c === '/' && line[i + 1] === '/') break;
+    if (c === '=' && /^\s*\{/.test(line.slice(i + 1))) { init = 0; out += '='; i++; continue; }
+    out += c; i++;
+  }
+  return out;
+}
 const FUNCTION = /^([A-Za-z_][\w \t\*]*?)\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{?\s*$/;
 
 const BOUNDARY = /[;{}]\s*$/;
@@ -154,7 +179,7 @@ export function instrument(source) {
     out.push(raw);
     // An initialiser such as "= {1, 2, 3}" carries braces that are not a scope
     // and would inflate the depth, hiding the declaration itself.
-    const structural = raw.replace(/=\s*\{[^}]*\}/g, '=0');
+    const structural = structuralOf(raw);
     const opens = (structural.match(/\{/g) || []).length;
     const closes = (structural.match(/\}/g) || []).length;
     // Depth before this line opens its brace: a function header is a top-level
@@ -172,7 +197,8 @@ export function instrument(source) {
     // A function header both opens the body's scope and declares its parameters.
     const fn = !isFunctionHead ? null : body.match(FUNCTION);
     if (fn) {
-      currentFunction = { name: fn[2], ret: specifierOf(fn[1]) };
+      // A pointer return type has no safe printf format, so only its exit is marked.
+      currentFunction = { name: fn[2], ret: /\*/.test(fn[1]) ? null : specifierOf(fn[1]) };
       for (const part of splitTop(fn[3], ',')) {
         for (const variable of declarationsIn(part.trim() + ';')) scopes[scopes.length - 1].push(variable);
       }
@@ -207,11 +233,12 @@ function parseField(field) {
 export function parseTrace(stdout) {
   const steps = [];
   const stack = [];
-  let output = '', last = null;
+  const lines = [];
+  let last = null;
   for (const line of String(stdout || '').split('\n')) {
     if (line.startsWith(MARK)) {
       const fields = line.slice(MARK.length).split('|');
-      steps.push({ line: Number(fields[0]) || 0, vars: fields.slice(1).map(parseField).filter(Boolean), output, stack: stack.map(f => f.name), reads: [], returns: [] });
+      steps.push({ line: Number(fields[0]) || 0, vars: fields.slice(1).map(parseField).filter(Boolean), output: lines.join('\n'), stack: stack.map(f => f.name), reads: [], returns: [] });
       last = steps[steps.length - 1];
       continue;
     }
@@ -233,9 +260,9 @@ export function parseTrace(stdout) {
       if (last && bar > 0) last.reads.push({ name: body.slice(0, bar), index: Number(body.slice(bar + 1)) });
       continue;
     }
-    output += line + '\n';
+    lines.push(line);
   }
-  return { steps, finalOutput: output };
+  return { steps, finalOutput: lines.join('\n') };
 }
 
 /**

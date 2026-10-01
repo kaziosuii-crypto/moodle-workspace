@@ -1,10 +1,11 @@
 {
   "name": "moodle-workspace",
   "private": true,
-  "version": "6.0.15",
+  "version": "6.0.16",
   "scripts": {
     "build": "node build.mjs",
     "test": "node --test tests.mjs",
+    "test:trace": "node tests-trace.mjs",
     "test:browser": "node browser-tests.mjs"
   },
   "dependencies": {
