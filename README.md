@@ -22,12 +22,13 @@
 2. 打开下面任意一条安装链接，Tampermonkey 会弹出安装页
 3. 点「安装」
 
-| 线路 | 安装地址 |
-|---|---|
-| Gitee（国内快） | `https://gitee.com/USER/moodle-workspace/raw/master/code.user.js` |
-| GitHub + jsDelivr | `https://cdn.jsdelivr.net/gh/USER/moodle-workspace@main/code.user.js` |
+**安装地址（jsDelivr，国内可直连）：**
 
-两条内容完全一致，装任意一条就行。
+```
+https://cdn.jsdelivr.net/gh/kaziosuii-crypto/moodle-workspace@main/code.user.js
+```
+
+源码镜像：[GitHub](https://github.com/kaziosuii-crypto/moodle-workspace) · [Gitee](https://gitee.com/Latmil/moodle-workspace)（Gitee 的 raw 会对非浏览器请求返回 403，所以只作源码镜像，不作更新源）
 
 ## 配置 API Key
 
@@ -39,8 +40,7 @@
 
 脚本头部带 `@version` / `@updateURL` / `@downloadURL`。Tampermonkey 默认每 24 小时检查一次，发现版本号变大就自动更新；也可以在其面板里点「检查更新」。
 
-- `@updateURL` 指向 **Gitee raw**：没有 CDN 缓存，新版本立刻可见
-- `@downloadURL` 指向 **jsDelivr**：国内下载稳定
+`@updateURL` 与 `@downloadURL` 都指向 jsDelivr。jsDelivr 对 `@main` 有小时级缓存，所以 `publish.mjs` 在每次推送后会调用 jsDelivr 的 purge 接口清缓存，保证新版本立刻可见。
 
 发布新版本只要改版本号再推上去，已安装的用户下次检查时就会自动更新。
 
