@@ -1,0 +1,9 @@
+node_modules/
+backups/
+.dbg/
+debug.log
+*.log
+
+# never commit a real API key
+ai-config.local.mjs
+.env
