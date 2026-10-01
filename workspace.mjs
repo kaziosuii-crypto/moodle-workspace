@@ -984,8 +984,10 @@ function traceValue(v,raw){
  * through while the new one rises into place. Showing only the new number hides
  * the one thing a learner needs to see.
  */
-function traceVarHTML(v,change){
-  const cls='trace-var'+(change?' changed':'');
+function traceVarHTML(v,changeArg){
+  // Callers may pass a boolean; only an object carries the previous value.
+  const change=changeArg&&typeof changeArg==='object'?changeArg:null;
+  const cls='trace-var'+(changeArg?' changed':'');
   const body=change
     ?'<span class="reel"><span class="reel-old">'+esc(traceValue(v,change.from))+'</span>'+
       '<span class="reel-new">'+esc(traceValue(v,v.value))+'</span></span>'
@@ -1117,6 +1119,7 @@ function renderTrace(){
   const spot=traceSpot();
   if(!spot)return;
   const step=spot.step;
+  const compactChanges=changedValues(spot.previous,spot.step);
   const pct=Math.round(((spot.index+1)/spot.total)*100);
   replaceContent(host,'<section class="trace">'+
     '<div class="trace-bar">'+
@@ -1130,7 +1133,7 @@ function renderTrace(){
     '</div>'+
     '<div class="trace-progress"><span style="width:'+pct+'%"></span></div>'+
     '<div class="trace-vars">'+(step.vars&&step.vars.length
-      ? step.vars.map(traceVarHTML).join('')
+      ? step.vars.map(v=>traceVarHTML(v,compactChanges.find(c=>c.name===v.name))).join('')
       : '<span class="trace-none">这一步还没有可见的变量</span>')+'</div>'+
     '<div class="trace-body">'+
       '<label class="field"><span class="field-head">本步之前的输出</span><pre class="trace-out">'+eolMark(step.output||'（还没有输出）')+'</pre></label>'+
