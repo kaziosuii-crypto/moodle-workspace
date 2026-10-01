@@ -18,7 +18,7 @@ const STEP_CAP = 20000;
 
 /** Format specifier and rendering kind for a declaration specifier list. */
 function specifierOf(spec) {
-  const s = spec.replace(/\s+/g, ' ').trim();
+  const s = spec.replace(/\s+/g, ' ').trim().replace(/^(?:(?:static|const|volatile|register|auto)\s+)+/, '');
   if (/^unsigned long long/.test(s)) return { kind: 'i', fmt: '%llu' };
   if (/^long long/.test(s)) return { kind: 'i', fmt: '%lld' };
   if (/^unsigned long/.test(s)) return { kind: 'i', fmt: '%lu' };
@@ -45,7 +45,7 @@ function splitTop(text, separator) {
   return parts;
 }
 
-const SPECIFIER = /^(?:(?:unsigned|signed|long|short|int|char|float|double|size_t)\s+)+/;
+const SPECIFIER = /^(?:(?:static|const|volatile|register|auto|unsigned|signed|long|short|int|char|float|double|size_t)\s+)+/;
 
 /** Names and kinds declared by one line, or [] when it declares nothing usable. */
 export function declarationsIn(line) {
@@ -78,6 +78,12 @@ function fieldsOf(variable) {
   return fields;
 }
 
+/** Every name visible here, innermost declaration winning where they shadow. */
+function visible(scopes) {
+  const all = scopes.flat(), out = [], seen = new Set();
+  for (let i = all.length - 1; i >= 0; i--) if (!seen.has(all[i].name)) { seen.add(all[i].name); out.unshift(all[i]); }
+  return out;
+}
 /** A marker statement for the variables visible at this point. */
 function marker(line, scope) {
   const fields = [];
@@ -114,23 +120,30 @@ export function instrument(source) {
     const unbracedHead = /^(if|for|while)\b/.test(previous) && /\)\s*$/.test(previous);
     const boundary = previous === '' || BOUNDARY.test(previous);
     if (scopes.length > 1 && boundary && !SKIP(body) && !unbracedHead) {
-      out.push(indent + marker(i + 1, scopes[scopes.length - 1]));
+      out.push(indent + marker(i + 1, visible(scopes)));
       count++;
     } else if (scopes.length > 1 && unbracedHead && !SKIP(body) && /;\s*$/.test(body)) {
-      out.push(indent + '{ ' + marker(i + 1, scopes[scopes.length - 1]) + ' ' + body + ' }');
+      out.push(indent + '{ ' + marker(i + 1, visible(scopes)) + ' ' + body + ' }');
       count++;
       previous = body;
       continue;
     }
     out.push(raw);
-    const opens = (raw.match(/\{/g) || []).length;
-    const closes = (raw.match(/\}/g) || []).length;
+    // An initialiser such as "= {1, 2, 3}" carries braces that are not a scope
+    // and would inflate the depth, hiding the declaration itself.
+    const structural = raw.replace(/=\s*\{[^}]*\}/g, '=0');
+    const opens = (structural.match(/\{/g) || []).length;
+    const closes = (structural.match(/\}/g) || []).length;
     for (let n = 0; n < opens; n++) scopes.push([]);
     for (let n = 0; n < closes; n++) if (scopes.length > 1) scopes.pop();
     const isFunctionHead = scopes.length === 1 && opens > 0 && /\(/.test(body);
     if (!isFunctionHead && opens === 0) {
       for (const variable of declarationsIn(body)) scopes[scopes.length - 1].push(variable);
     }
+    // "for (int i = 0; ...)" declares its counter in the loop's own scope, and a
+    // brace on the same line would otherwise hide it from the scan above.
+    const header = raw.match(/\bfor\s*\(([^;]*);/);
+    if (header) for (const variable of declarationsIn(header[1] + ';')) scopes[scopes.length - 1].push(variable);
     if (body) previous = body;
   }
   const text = out.join('\n');
