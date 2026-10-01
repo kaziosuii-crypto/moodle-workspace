@@ -142,13 +142,17 @@ export function instrument(source) {
   let count = 0;
   let previous = '';
   let currentFunction = null;
+  // Instrumentation is only valid inside a function body. A struct / union / enum
+  // definition also opens a brace at file scope, so brace count alone cannot tell
+  // them apart — the depth of the enclosing function is tracked explicitly.
+  let braceDepth = 0, functionBase = null;
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
     const body = raw.trim();
     const indent = (raw.match(/^\s*/) || [''])[0];
     const unbracedHead = /^(if|for|while)\b/.test(previous) && /\)\s*$/.test(previous);
     const boundary = previous === '' || BOUNDARY.test(previous);
-    if (scopes.length > 1 && boundary && !SKIP(body) && !unbracedHead) {
+    if (functionBase !== null && boundary && !SKIP(body) && !unbracedHead) {
       out.push(indent + marker(i + 1, visible(scopes)));
       count++;
       // Reads are recorded separately so the UI can light up the exact array cell.
@@ -170,7 +174,7 @@ export function instrument(source) {
       } else if (currentFunction && !currentFunction.ret && /^return\b/.test(body)) {
         out.push(indent + 'printf("__WS_RET__%s\\n","' + currentFunction.name + '");');
       }
-    } else if (scopes.length > 1 && unbracedHead && !SKIP(body) && /;\s*$/.test(body)) {
+    } else if (functionBase !== null && unbracedHead && !SKIP(body) && /;\s*$/.test(body)) {
       out.push(indent + '{ ' + marker(i + 1, visible(scopes)) + ' ' + body + ' }');
       count++;
       previous = body;
@@ -184,9 +188,11 @@ export function instrument(source) {
     const closes = (structural.match(/\}/g) || []).length;
     // Depth before this line opens its brace: a function header is a top-level
     // line that opens a block and names a parameter list.
-    const isFunctionHead = scopes.length === 1 && opens > 0 && /\(/.test(body);
+    const isFunctionHead = braceDepth === 0 && opens > 0 && /\(/.test(body);
     for (let n = 0; n < opens; n++) scopes.push([]);
     for (let n = 0; n < closes; n++) if (scopes.length > 1) scopes.pop();
+    braceDepth += opens - closes;
+    if (functionBase !== null && braceDepth < functionBase) functionBase = null;
     if (!isFunctionHead && opens === 0) {
       for (const variable of declarationsIn(body)) scopes[scopes.length - 1].push(variable);
     }
@@ -197,6 +203,7 @@ export function instrument(source) {
     // A function header both opens the body's scope and declares its parameters.
     const fn = !isFunctionHead ? null : body.match(FUNCTION);
     if (fn) {
+      functionBase = braceDepth;
       // A pointer return type has no safe printf format, so only its exit is marked.
       currentFunction = { name: fn[2], ret: /\*/.test(fn[1]) ? null : specifierOf(fn[1]) };
       for (const part of splitTop(fn[3], ',')) {

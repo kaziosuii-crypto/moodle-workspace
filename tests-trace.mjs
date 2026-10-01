@@ -7,6 +7,7 @@ const CASES = {
   'arrays + loops': ['int main(void) {', '    int a[4] = {5, 6, 7, 8};', '    int s = 0;', '    for (int i = 0; i < 4; i++) {', '        s += a[i];', '    }', '    printf("%d\\n", s);', '    return 0;', '}'],
   'torture types': ['struct p { int x; };', 'int *pick(int *q) { return q; }', 'int main(void) {', '    int unsized[] = {1, 2};', '    int grid[2][2] = {{1,2},{3,4}};', '    struct p pt;', '    pt.x = 7;', '    int ok[2] = {9, 8};', '    int *ptr = ok;', '    char s[8] = "hi";', '    printf("%d %d %d %s\\n", unsized[1], grid[1][0], ptr[1], s);', '    return 0;', '}'],
   'braces in text': ['int main(void) {', '    // a comment with { and }', '    char t[] = "}{ mixed {";', '    int n = 2;', '    printf("%s %d\\n", t, n);', '    return 0;', '}'],
+  'struct at file scope': ['struct node {', '    int val;', '    struct node* next;', '};', 'enum colour { RED, GREEN };', 'int main(void) {', '    struct node* p = (struct node*)malloc(sizeof(struct node));', '    p->val = 7;', '    for (int i = 0; i < 3; i++) {', '        p->val = p->val + i;', '    }', '    printf("%d\\n", p->val);', '    free(p);', '    return 0;', '}'],
   'switch + nested loops': ['int main(void) {', '    int total = 0;', '    for (int i = 0; i < 3; i++) {', '        for (int j = 0; j < 3; j++) {', '            switch (i) {', '                case 0: total += 1; break;', '                default: total += 2;', '            }', '        }', '    }', '    printf("%d\\n", total);', '    return 0;', '}'],
 };
 
