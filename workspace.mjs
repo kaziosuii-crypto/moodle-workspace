@@ -1045,11 +1045,35 @@ function applyGraphView(){
   if(label)label.textContent=Math.round(v.zoom*100)+'%';
 }
 function graphHTML(nodes,prev){
-  const W=134,H=60,GX=58,GY=52,cols=Math.min(4,Math.max(1,nodes.length));
+  const W=134,H=60,GX=58,GY=52;
+  // Columns come from the available width, not a fixed count.
+  const avail=Math.max(340,(window.innerWidth||1200)-96);
+  const cols=Math.max(1,Math.min(6,Math.floor((avail+GX)/(W+GX))));
+  // Follow the links to recover the shape: a cycle is drawn as a ring, a chain as
+  // a snake (so neighbours are always adjacent), anything branching as a grid.
+  const byAddr=new Map(nodes.map(n=>[n.addr,n]));
+  const next=new Map();
+  for(const n of nodes){const l=n.fields.find(f=>f.kind==='p'&&byAddr.has(f.value));if(l)next.set(n.addr,l.value);}
+  const order=[],seen=new Set();
+  let walk=nodes.length?nodes[0].addr:null;
+  while(walk&&byAddr.has(walk)&&!seen.has(walk)){seen.add(walk);order.push(byAddr.get(walk));walk=next.get(walk);}
+  for(const n of nodes)if(!seen.has(n.addr))order.push(n);
+  const cyclic=order.length>2&&next.get(order[order.length-1].addr)===order[0].addr;
   const pos=new Map();
-  nodes.forEach((n,i)=>pos.set(n.addr,{x:(i%cols)*(W+GX)+2,y:Math.floor(i/cols)*(H+GY)+2}));
-  const rows=Math.ceil(nodes.length/cols);
-  const width=cols*W+(cols-1)*GX+4, height=rows*H+(rows-1)*GY+4;
+  let width,height;
+  if(cyclic){
+    const R=Math.max(170,Math.round(order.length*(W*0.62)/Math.PI));
+    const cx=R+W/2+10, cy=R+H/2+10;
+    order.forEach((n,i)=>{const a=-Math.PI/2+i*2*Math.PI/order.length;pos.set(n.addr,{x:cx+R*Math.cos(a)-W/2,y:cy+R*Math.sin(a)-H/2});});
+    width=2*R+W+20; height=2*R+H+20;
+  }else{
+    const rows=Math.ceil(order.length/cols);
+    order.forEach((n,i)=>{
+      const row=Math.floor(i/cols), col=i%cols;
+      pos.set(n.addr,{x:(row%2?cols-1-col:col)*(W+GX)+2,y:row*(H+GY)+2});
+    });
+    width=cols*W+(cols-1)*GX+4; height=rows*H+(rows-1)*GY+4;
+  }
   let boxes='',edges='';
   for(const n of nodes){
     const p=pos.get(n.addr);
@@ -1059,16 +1083,19 @@ function graphHTML(nodes,prev){
       '</div>';
     for(const f of n.fields.filter(x=>x.kind==='p')){
       const to=pos.get(f.value);
-      const sx=p.x+W, sy=p.y+H/2;
       const fresh=prev.edges.has(n.addr+'|'+f.name+'|'+f.value)?'':' new';
+      const sx=p.x+W, sy=p.y+H/2;
       if(!to){ edges+='<path class="ts-edge dangling'+fresh+'" d="M'+sx+' '+sy+' h20"/>'; continue; }
-      const tx=to.x, ty=to.y+H/2;
-      if(tx>sx){
-        edges+='<path class="ts-edge'+fresh+'" marker-end="url(#ts-head)" d="M'+sx+' '+sy+' C'+(sx+22)+' '+sy+' '+(tx-22)+' '+ty+' '+tx+' '+ty+'"/>';
-      }else{
-        const by=Math.max(p.y,to.y)+H+20;
-        edges+='<path class="ts-edge back'+fresh+'" marker-end="url(#ts-head)" d="M'+(p.x+W/2)+' '+(p.y+H)+' C'+(p.x+W/2)+' '+by+' '+(to.x+W/2)+' '+by+' '+(to.x+W/2)+' '+(to.y+H)+'"/>';
-      }
+      // Centre to centre, trimmed to each box border, so an arrow leaves the side
+      // it is actually heading towards instead of always the right edge.
+      const ax=p.x+W/2, ay=p.y+H/2, bx=to.x+W/2, by=to.y+H/2;
+      const dx=bx-ax, dy=by-ay;
+      // How far along the centre line the box border sits, per axis.
+      const fit=pad=>Math.min(dx?(W/2+pad)/Math.abs(dx):1e9, dy?(H/2+pad)/Math.abs(dy):1e9);
+      const start=fit(9), end=fit(13);
+      if(start>=1||end>=1)continue;
+      const fx=ax+dx*start, fy=ay+dy*start, ex=bx-dx*end, ey=by-dy*end;
+      edges+='<path class="ts-edge'+fresh+'" marker-end="url(#ts-head)" d="M'+fx.toFixed(1)+' '+fy.toFixed(1)+' L'+ex.toFixed(1)+' '+ey.toFixed(1)+'"/>';
     }
   }
   return '<div class="ts-zoom"><button data-action="graph-out">−</button><span>100%</span><button data-action="graph-in">+</button><button data-action="graph-fit">适应</button><span class="ts-zoom-hint">滚轮缩放 · 拖动平移</span></div>'+
