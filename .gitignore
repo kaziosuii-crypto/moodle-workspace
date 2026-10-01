@@ -7,3 +7,4 @@ debug.log
 # never commit a real API key
 ai-config.local.mjs
 .env
+code.js
