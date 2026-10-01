@@ -40,6 +40,7 @@ let testIndex = 0, resultIndex = 0, activeLeft = 'description', activeBottom = '
 const prefsKey = 'moodle-workspace:v4:settings';
 const read = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } };
 const storedPrefs=read(prefsKey,{});
+dropStoredAnalyses();
 let prefs = {enabled:storedPrefs.aiV5Enabled??true,runner:storedPrefs.runner||''};
 function persist(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); return true; }
@@ -66,7 +67,11 @@ const $ = s => root.querySelector(s);
 const $$ = s => [...root.querySelectorAll(s)];
 const activity = (file, id=current?.id) => new URL(`${file}?a=${encodeURIComponent(id)}`, base).href;
 const draftKey = id => `moodle-workspace:v4:${location.origin}:${id}`;
-const tutorKey = id => `moodle-workspace:v5:tutor:${location.origin}:${id}`;
+// AI analyses are read once and were never worth their storage footprint: at a
+// few KB each they are what filled localStorage and broke draft saving.
+function dropStoredAnalyses() {
+  try { for (const key of Object.keys(localStorage)) if (key.includes(':tutor:')) localStorage.removeItem(key); } catch {}
+}
 const code = () => editor?.state.doc.toString() ?? current?.draft.code ?? '';
 const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)');
 const motions=new Set();
@@ -452,11 +457,7 @@ async function loadExercise(viewURL, push=true) {
     });
     const nativeCompiler=form.querySelector('select[name=language]');
     if (draft.compiler && [...nativeCompiler.options].some(o=>o.value===draft.compiler)) nativeCompiler.value=draft.compiler;
-    const savedTutor=read(tutorKey(id),null);
-  const tutor=savedTutor?.answer
-    ?{status:'done',mode:'guide',question:'',sourceCode:savedTutor.sourceCode,answer:savedTutor.answer,context:savedTutor.context||{publicCases:0,customCases:0,resultCases:0}}
-    :{status:'idle',mode:'guide',question:''};
-  current={id,problem,form,viewURL,submitURL:problem.submitURL,draft,result:null,viewDoc,submitDoc,tutor};
+    current={id,problem,form,viewURL,submitURL:problem.submitURL,draft,result:null,viewDoc,submitDoc,tutor:{status:'idle',mode:'guide',question:''}};
     currentIndex=problems.findIndex(p=>p.current);
     testIndex=0; resultIndex=0;
     if (!host) { mount();createEditor(); }
@@ -763,7 +764,6 @@ async function askTutor() {
     const answer=await llm(prompt,{system:TUTOR_SYSTEM,json:true,signal:controller.signal,onDelta:(delta,full)=>appendTutorStream(t,full)});
     if(controller.signal.aborted || current!==exercise)return;
     t.answer=parseTutorResponse(answer,context.lineCount);t.status='done';t.stream='';
-    persist(tutorKey(exercise.id),{sourceCode:t.sourceCode,answer:t.answer,context:t.context,at:Date.now()});
     syncDiagnosis();
   }catch(error){
     if(current!==exercise || tutorRequest!==controller)return;
@@ -1177,7 +1177,6 @@ async function explainCompileErrors() {
  */
 function collectArchive() {
   const draftPrefix='moodle-workspace:v4:'+location.origin+':';
-  const tutorPrefix='moodle-workspace:v5:tutor:'+location.origin+':';
   const entries=[];
   for(const key of Object.keys(localStorage)){
     if(!key.startsWith(draftPrefix))continue;
@@ -1186,13 +1185,10 @@ function collectArchive() {
     try{draft=JSON.parse(localStorage.getItem(key));}catch{continue;}
     if(!draft||typeof draft!=='object')continue;
     const meta=problems.find(p=>{try{return new URL(p.url).searchParams.get('a')===id;}catch{return false;}});
-    let tutor=null;
-    try{tutor=JSON.parse(localStorage.getItem(tutorPrefix+id));}catch{}
     entries.push({
       id,title:String(draft.title||meta?.title||('题目 '+id)),url:meta?.url||'',
       code:String(draft.code||''),
-      tests:Array.isArray(draft.tests)?draft.tests:[],
-      tutor:tutor?.answer?{at:tutor.at||null,answer:tutor.answer}:null
+      tests:Array.isArray(draft.tests)?draft.tests:[]
     });
   }
   entries.sort((a,b)=>a.title.localeCompare(b.title,'zh'));
@@ -1217,16 +1213,6 @@ function archiveMarkdown(archive) {
       item.tests.forEach((test,i)=>lines.push((i+1)+'. ['+(test.source||'自定义')+'] 输入 '+fence+JSON.stringify(test.input||'')+fence+' → 期望 '+fence+JSON.stringify(test.expected||'')+fence));
       lines.push('');
     }
-    if(item.tutor){
-      const answer=item.tutor.answer||{};
-      lines.push('### AI 分析','',String(answer.explanation||''),'');
-      const issues=Array.isArray(answer.issues)?answer.issues:[];
-      issues.forEach(issue=>{
-        lines.push('- **'+String(issue.title||'问题')+'**'+(issue.startLine?'（第 '+issue.startLine+' 行）':'')+'：'+String(issue.problem||''));
-        if(issue.hint)lines.push('  - 提示：'+issue.hint);
-      });
-      lines.push('');
-    }
   }
   return lines.join('\n');
 }
@@ -1241,10 +1227,9 @@ function openExport() {
   const archive=collectArchive();
   const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
   const cases=archive.problems.reduce((sum,item)=>sum+item.tests.length,0);
-  const analyses=archive.problems.filter(item=>item.tutor).length;
   const m=openModal('<header><h2>导出工作区</h2><button data-close aria-label="关闭">'+icon('close')+'</button></header>'+
-    '<p class="hint">把本机保存的草稿、用例和 AI 分析打包带走。换电脑或清理浏览器数据后都能恢复。</p>'+
-    '<div class="facts"><span>'+archive.problemCount+' 道题有草稿</span><span>'+cases+' 个用例</span><span>'+analyses+' 份 AI 分析</span></div>'+
+    '<p class="hint">把本机保存的草稿和用例打包带走。换电脑或清理浏览器数据后都能恢复。AI 分析只留在当前页面，不会存进本机。</p>'+
+    '<div class="facts"><span>'+archive.problemCount+' 道题有草稿</span><span>'+cases+' 个用例</span></div>'+
     '<footer><button data-close>取消</button><button data-export="json" class="primary">导出 JSON</button><button data-export="md">导出 Markdown</button></footer>');
   const save=format=>{
     const fresh=collectArchive();
