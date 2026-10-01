@@ -93,6 +93,9 @@ function marker(line, scope) {
   return 'if(__ws_steps++<' + STEP_CAP + ')printf("' + format + '\\n",' + args.join(',') + ');';
 }
 
+/** "int isPrime(int n) {" -> return type, name, parameter list. */
+const FUNCTION = /^([A-Za-z_][\w \t\*]*?)\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{?\s*$/;
+
 const BOUNDARY = /[;{}]\s*$/;
 const CONTROL = /^(if|else|for|while|do|switch)\b/;
 const SKIP = body => !body || body.startsWith('#') || body.startsWith('}') ||
@@ -113,6 +116,7 @@ export function instrument(source) {
   const scopes = [[]];
   let count = 0;
   let previous = '';
+  let currentFunction = null;
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
     const body = raw.trim();
@@ -122,6 +126,25 @@ export function instrument(source) {
     if (scopes.length > 1 && boundary && !SKIP(body) && !unbracedHead) {
       out.push(indent + marker(i + 1, visible(scopes)));
       count++;
+      // Reads are recorded separately so the UI can light up the exact array cell.
+      for (const variable of visible(scopes)) {
+        if (!variable.size) continue;
+        const subscript = new RegExp('\\b' + variable.name + '\\s*\\[([^\\]]+)\\]', 'g');
+        let hit;
+        while ((hit = subscript.exec(body))) {
+          const index = hit[1].trim();
+          if (/[+-]{2}|=/.test(index)) continue;
+          out.push(indent + 'printf("__WS_READ__%s|%d\\n","' + variable.name + '",(' + index + '));');
+        }
+      }
+      if (currentFunction && currentFunction.ret && /^return\b/.test(body)) {
+        const value = body.replace(/^return\b/, '').replace(/;\s*$/, '').trim();
+        if (value) {
+          out.push(indent + 'printf("__WS_RET__%s|ret=' + currentFunction.ret.fmt + '\\n","' + currentFunction.name + '",(' + value + '));');
+        }
+      } else if (currentFunction && !currentFunction.ret && /^return\b/.test(body)) {
+        out.push(indent + 'printf("__WS_RET__%s\\n","' + currentFunction.name + '");');
+      }
     } else if (scopes.length > 1 && unbracedHead && !SKIP(body) && /;\s*$/.test(body)) {
       out.push(indent + '{ ' + marker(i + 1, visible(scopes)) + ' ' + body + ' }');
       count++;
@@ -134,9 +157,11 @@ export function instrument(source) {
     const structural = raw.replace(/=\s*\{[^}]*\}/g, '=0');
     const opens = (structural.match(/\{/g) || []).length;
     const closes = (structural.match(/\}/g) || []).length;
+    // Depth before this line opens its brace: a function header is a top-level
+    // line that opens a block and names a parameter list.
+    const isFunctionHead = scopes.length === 1 && opens > 0 && /\(/.test(body);
     for (let n = 0; n < opens; n++) scopes.push([]);
     for (let n = 0; n < closes; n++) if (scopes.length > 1) scopes.pop();
-    const isFunctionHead = scopes.length === 1 && opens > 0 && /\(/.test(body);
     if (!isFunctionHead && opens === 0) {
       for (const variable of declarationsIn(body)) scopes[scopes.length - 1].push(variable);
     }
@@ -144,6 +169,18 @@ export function instrument(source) {
     // brace on the same line would otherwise hide it from the scan above.
     const header = raw.match(/\bfor\s*\(([^;]*);/);
     if (header) for (const variable of declarationsIn(header[1] + ';')) scopes[scopes.length - 1].push(variable);
+    // A function header both opens the body's scope and declares its parameters.
+    const fn = !isFunctionHead ? null : body.match(FUNCTION);
+    if (fn) {
+      currentFunction = { name: fn[2], ret: specifierOf(fn[1]) };
+      for (const part of splitTop(fn[3], ',')) {
+        for (const variable of declarationsIn(part.trim() + ';')) scopes[scopes.length - 1].push(variable);
+      }
+      const scope = scopes[scopes.length - 1];
+      const fields = scope.map(v => v.kind + ':' + v.name + '=' + v.fmt);
+      out.push(indent + '  printf("__WS_CALL__%s' + (fields.length ? '|' + fields.join('|') : '') + '\\n","' + fn[2] + '"' +
+        (scope.length ? ',' + scope.map(v => v.name).join(',') : '') + ');');
+    }
     if (body) previous = body;
   }
   const text = out.join('\n');
@@ -151,22 +188,49 @@ export function instrument(source) {
 }
 
 /** Split program output into replayed steps (line, live variables, output so far). */
+/** "i:n=3" -> { name:'n', kind:'i', value:'3' } */
+function parseField(field) {
+  const split = field.indexOf('=');
+  if (split < 0) return null;
+  const key = field.slice(0, split), value = field.slice(split + 1);
+  const colon = key.indexOf(':');
+  return { name: colon < 0 ? key : key.slice(colon + 1), kind: colon < 0 ? 'i' : key.slice(0, colon), value };
+}
+
+/**
+ * Replay the marker stream into steps.
+ *
+ * Enter/return markers are interleaved with the step markers, so walking them in
+ * order rebuilds the call stack that was live at each step, and array reads are
+ * attached to the step that performed them.
+ */
 export function parseTrace(stdout) {
   const steps = [];
-  let output = '';
+  const stack = [];
+  let output = '', last = null;
   for (const line of String(stdout || '').split('\n')) {
-    const at = line.indexOf(MARK);
-    if (at === 0) {
+    if (line.startsWith(MARK)) {
       const fields = line.slice(MARK.length).split('|');
-      const variables = [];
-      for (const field of fields.slice(1)) {
-        const split = field.indexOf('=');
-        if (split < 0) continue;
-        const key = field.slice(0, split), value = field.slice(split + 1);
-        const colon = key.indexOf(':');
-        variables.push({ name: colon < 0 ? key : key.slice(colon + 1), kind: colon < 0 ? 'i' : key.slice(0, colon), value });
-      }
-      steps.push({ line: Number(fields[0]) || 0, vars: variables, output });
+      steps.push({ line: Number(fields[0]) || 0, vars: fields.slice(1).map(parseField).filter(Boolean), output, stack: stack.map(f => f.name), reads: [], returns: [] });
+      last = steps[steps.length - 1];
+      continue;
+    }
+    if (line.startsWith('__WS_CALL__')) {
+      const body = line.slice(11), bar = body.indexOf('|');
+      const name = bar < 0 ? body : body.slice(0, bar);
+      stack.push({ name, args: (bar < 0 ? '' : body.slice(bar + 1)).split('|').map(parseField).filter(Boolean) });
+      continue;
+    }
+    if (line.startsWith('__WS_RET__')) {
+      const body = line.slice(10), bar = body.indexOf('|');
+      const name = bar < 0 ? body : body.slice(0, bar);
+      stack.pop();
+      if (last) last.returns.push({ name, value: bar < 0 ? null : body.slice(bar + 1).replace(/^ret=/, '') });
+      continue;
+    }
+    if (line.startsWith('__WS_READ__')) {
+      const body = line.slice(11), bar = body.indexOf('|');
+      if (last && bar > 0) last.reads.push({ name: body.slice(0, bar), index: Number(body.slice(bar + 1)) });
       continue;
     }
     output += line + '\n';
