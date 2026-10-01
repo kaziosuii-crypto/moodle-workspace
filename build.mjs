@@ -27,8 +27,14 @@ const header = [
   (raw || cdn || gitee) ? '// @updateURL    ' + (raw || cdn || gitee) : '',
   (raw || cdn || gitee) ? '// @downloadURL  ' + (raw || cdn || gitee) : '',
   cdn ? '// @cdnFallback  ' + cdn : '',
+  // @match anchors the path from the start, so it misses a path-prefix proxy
+  // such as WebVPN (/http/<40-hex>/moodle/mod/programming/...). @include treats
+  // "*" as any characters including "/", which covers both direct and proxied.
   '// @match        *://*/moodle/mod/programming/*',
   '// @match        *://*/mod/programming/*',
+  '// @match        *://*/*/mod/programming/*',
+  '// @include      *moodle/mod/programming*',
+  '// @include      *mod/programming*',
   '// @grant        none',
   '// @run-at       document-idle',
   '// ==/UserScript=='
