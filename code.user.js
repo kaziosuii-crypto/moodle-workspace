@@ -8,7 +8,7 @@
 // @license      MIT
 // @homepageURL  https://github.com/kaziosuii-crypto/moodle-workspace
 // @supportURL   https://github.com/kaziosuii-crypto/moodle-workspace/issues
-// @updateURL    https://gitee.com/Latmil/moodle-workspace/raw/master/code.user.js
+// @updateURL    https://cdn.jsdelivr.net/gh/kaziosuii-crypto/moodle-workspace@main/code.user.js
 // @downloadURL  https://cdn.jsdelivr.net/gh/kaziosuii-crypto/moodle-workspace@main/code.user.js
 // @match        *://*/moodle/mod/programming/*
 // @match        *://*/mod/programming/*

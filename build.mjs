@@ -20,7 +20,10 @@ const header = [
   '// @license      MIT',
   home ? '// @homepageURL  ' + home : '',
   home ? '// @supportURL   ' + home + '/issues' : '',
-  gitee ? '// @updateURL    ' + gitee : '',
+  // Gitee raw answers 403 to every non-browser fetch, so it cannot serve an
+  // update channel. jsDelivr over the GitHub repo does, and publish.mjs purges
+  // its cache after each push so a new version is visible immediately.
+  (cdn || gitee) ? '// @updateURL    ' + (cdn || gitee) : '',
   (cdn || gitee) ? '// @downloadURL  ' + (cdn || gitee) : '',
   '// @match        *://*/moodle/mod/programming/*',
   '// @match        *://*/mod/programming/*',
