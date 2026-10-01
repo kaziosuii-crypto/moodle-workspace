@@ -10,6 +10,7 @@ import { esc, text, safeURL, ioDisplay, parseProblem, parseNavigation, parseResu
 import { parseCompileIssues, diffBlock, describeDiff } from './diagnostics.mjs';
 import { SANDBOX_SOURCE } from './sandbox.mjs';
 import { getKey, setKey, hasKey, maskKey } from './ai-key.mjs';
+import { instrument, parseTrace, describeStep } from './trace.mjs';
 import { animate, stagger } from 'animejs';
 import { AI_CONFIG } from './ai-config.mjs';
 import { llm } from './ai.mjs';
@@ -265,7 +266,7 @@ function mount() {
       <div class="right">
         <section class="panel code-panel">
           <header class="panel-head">${icon('code','green')}<strong style="font-size:12px;font-weight:500">代码</strong><span class="grow"></span>${button('mobile-description','题目','doc','mobile-toggle')}${button('expand','','expand','','切换专注模式')}</header>
-          <div class="editor-bar"><select data-language aria-label="编译器"></select><span class="muted optional" style="font-size:11px">CodeMirror 6</span><span class="grow"></span>${button('indent','','list','','重新缩进')}${button('file','','upload','','源文件上传')}${button('clear','','trash','','清空代码')}</div>
+          <div class="editor-bar"><select data-language aria-label="编译器"></select><span class="muted optional" style="font-size:11px">CodeMirror 6</span><span class="grow"></span>${button('trace','单步','run','','逐行播放这段代码的执行过程')}${button('indent','','list','','重新缩进')}${button('file','','upload','','源文件上传')}${button('clear','','trash','','清空代码')}</div>
           <div class="attachment hidden" data-attachment><span>源文件（优先提交所选文件）</span><span data-file-slot></span>${button('unfile','取消文件','','')}</div>
           <div class="editor-host"><div class="ai-layer hidden" data-ai-layer></div></div>
           <footer class="foot"><span data-save>已存储</span><span data-cursor>行 1，列 1</span></footer>
@@ -894,6 +895,100 @@ async function loadToolchain(onProgress){
   cToolchain={compile:toolchain.compile,shim};
   return cToolchain;
 }
+/* ------------------------------------------------------------ 逐行执行动画 --
+ * The program is recompiled with a marker before every statement, run once,
+ * and the recorded markers are replayed as an animation. Nothing here needs a
+ * debugger, and it reuses the same sandbox and compiler as a normal run.
+ */
+let traceTimer=null;
+function traceStop(){
+  clearInterval(traceTimer);traceTimer=null;
+  if(current?.trace)current.trace.playing=false;
+  syncDiagnosis();
+  renderTrace();
+}
+function traceHighlight(line){
+  if(!editor)return;
+  const n=Math.min(Math.max(line,1),editor.state.doc.lines);
+  const from=editor.state.doc.line(n).from;
+  editor.dispatch({effects:[
+    diagnosisEffect.of([{startLine:n,endLine:n,severity:'info',title:'第 '+n+' 行',problem:'',hint:''}]),
+    EditorView.scrollIntoView(from,{y:'center'})
+  ]});
+  renderInlineDiagnosis();
+}
+function traceGoto(index){
+  const trace=current?.trace;
+  if(!trace?.steps?.length)return;
+  trace.index=Math.max(0,Math.min(index,trace.steps.length-1));
+  traceHighlight(trace.steps[trace.index].line);
+  renderTrace();
+}
+function tracePlay(){
+  const trace=current?.trace;
+  if(!trace?.steps?.length)return;
+  if(trace.playing){traceStop();return;}
+  trace.playing=true;
+  trace.index=trace.index>=trace.steps.length-1?0:trace.index;
+  traceHighlight(trace.steps[trace.index].line);
+  renderTrace();
+  traceTimer=setInterval(()=>{
+    const state=current?.trace;
+    if(!state?.playing||!state.steps.length)return traceStop();
+    if(state.index>=state.steps.length-1)return traceStop();
+    state.index++;
+    traceHighlight(state.steps[state.index].line);
+    renderTrace();
+  },560);
+}
+function renderTrace(){
+  const host=$('[data-bottom-body]');
+  if(!host)return;
+  const trace=current?.trace;
+  if(!trace){replaceContent(host,'<div class="empty">'+icon('run')+'点「单步」把这段代码的执行过程演一遍。</div>');return;}
+  if(trace.status==='loading'){replaceContent(host,loadingHTML(trace.message||'正在编译并记录执行过程','记录完成后可以逐步播放，也可以自动播放。'));animateLoading(host);return;}
+  if(trace.status==='error'){replaceContent(host,'<div class="results"><div class="result-title red">无法记录执行过程<small></small></div><div class="result-detail"><pre>'+esc(trace.error)+'</pre></div></div>');return;}
+  const step=trace.steps[trace.index];
+  const pct=Math.round(((trace.index+1)/trace.steps.length)*100);
+  replaceContent(host,'<section class="trace">'+
+    '<div class="trace-bar">'+
+      button('trace-prev','上一步','prev')+
+      button('trace-play',trace.playing?'暂停':'自动播放','run')+
+      button('trace-next','下一步','next')+
+      button('trace-stop','停止','close')+
+      '<span class="trace-count">'+esc(describeStep(trace.steps,trace.index))+'</span>'+
+    '</div>'+
+    '<div class="trace-progress"><span style="width:'+pct+'%"></span></div>'+
+    '<div class="trace-body">'+
+      '<label class="field"><span class="field-head">本步之前的输出</span><pre class="trace-out">'+eolMark(step.output||'（还没有输出）')+'</pre></label>'+
+      '<label class="field"><span class="field-head">程序最终输出</span><pre class="trace-out">'+eolMark(trace.finalOutput||'（没有输出）')+'</pre></label>'+
+    '</div>'+
+    '<input class="trace-range" type="range" min="1" max="'+trace.steps.length+'" value="'+(trace.index+1)+'" data-trace-seek aria-label="执行进度">'+
+  '</section>');
+  const seek=host.querySelector('[data-trace-seek]');
+  if(seek)seek.oninput=event=>{clearInterval(traceTimer);traceTimer=null;current.trace.playing=false;traceGoto(Number(event.target.value)-1);};
+}
+async function startTrace(){
+  if(busy)return;
+  const {source,count}=instrument(code());
+  if(!count){toast('这段代码里没有识别到可以逐行执行的语句。');return;}
+  const input=current.draft.tests[testIndex]?.input ?? current.draft.tests[0]?.input ?? '';
+  traceStop();
+  setBusy(true);
+  current.trace={status:'loading',message:'正在编译并记录执行过程'};
+  renderTrace();
+  try{
+    const module=await compileC(source,message=>{current.trace={status:'loading',message};renderTrace();});
+    const {stdout}=await runCModule(module,input);
+    const {steps,finalOutput}=parseTrace(stdout);
+    if(!steps.length)throw new Error('没有记录到任何执行步骤，代码可能一进入就退出了。');
+    current.trace={status:'ready',steps,finalOutput,index:0,playing:false};
+    traceHighlight(steps[0].line);
+  }catch(error){
+    current.trace={status:'error',error:error.message};
+  }finally{setBusy(false);}
+  renderTrace();
+}
 async function compileC(source,onProgress){
   const {compile}=await loadToolchain(onProgress);
   onProgress?.('正在编译…');
@@ -1271,6 +1366,11 @@ async function handleClick(event) {
     case 'refresh-result':return refreshResult();
     case 'refresh-problem':return loadExercise(current.viewURL,false);
     case 'complete':return complete();
+    case 'trace':return startTrace();
+    case 'trace-next':return traceGoto((current.trace?.index??0)+1);
+    case 'trace-prev':return traceGoto((current.trace?.index??0)-1);
+    case 'trace-play':return tracePlay();
+    case 'trace-stop':return traceStop();
     case 'export':return openExport();
     case 'explain-error':return explainCompileErrors().catch(error=>toast(error.message));
     case 'generate':return openGenerateDialog();
