@@ -1714,6 +1714,7 @@ function renderTraceScreen(){
   const spot=traceSpot();
   if(!spot)return traceCloseScreen();
   const trace=current.trace,changes=changedValues(spot.previous,spot.step);
+  stopSkipReplay();
   if(!trace.view)trace.view={zoom:1,x:0,y:0};
   const changedSet=new Set(changes.map(c=>c.name)),grouped=groupVars(spot.step.vars);
   const changeOf=name=>changes.find(c=>c.name===name);
@@ -1721,6 +1722,7 @@ function renderTraceScreen(){
       '<header class="ts-head">'+
         '<span class="ts-dot"></span><span class="ts-title">逐行执行</span>'+
         '<span class="ts-step">'+esc(traceLabel())+'</span>'+
+        (trace.skip&&trace.skip.length?'<span class="ts-skip-note">'+esc(skipBadge(trace.skip))+'</span>':'')+
         '<span class="grow"></span>'+
         '<button data-action="trace-mode" class="ts-btn mode">'+(trace.mode==='skip'?'跳行模式':'全部步骤')+'</button>'+
         '<button data-action="trace-play" class="ts-btn">'+(trace.playing?'暂停':'播放')+'</button>'+
@@ -1728,7 +1730,7 @@ function renderTraceScreen(){
         '<button data-action="trace-next" class="ts-btn">下一步</button>'+
         '<button data-action="trace-close" class="ts-btn">退出全屏</button>'+
       '</header>'+
-      '<div class="ts-stack">'+stackHTML(spot.step.stack,spot.step.returns)+'</div>'+skipHTML(trace)+
+      '<div class="ts-stack">'+stackHTML(spot.step.stack,spot.step.returns)+'</div>'+
       // Plain values are drawn on the canvas too, so a step with no heap yet is still
       // worth opening - otherwise the feature looks broken on a simple program.
       (spot.step.nodes.length||(spot.step.vars||[]).length?'<div class="ts-preview">'+
@@ -1756,18 +1758,10 @@ function renderTraceScreen(){
         '<span class="ts-hint">空格 播放/暂停 · ← → 上一步/下一步 · 跳行模式会略过同一行上的重复执行</span>'+
       '</footer>'+
     '</section>';
-  // The chips that actually changed are the ones worth looking at, so they land
-  // last and pop.
-  // Unchanged values stay perfectly still, so the eye only follows what moved.
-  // Value reel: the old number lifts away while the new one rises in.
-  host.querySelectorAll('.reel-old').forEach(old=>{
-    motion(old,{translateY:[-15],opacity:[1,0],duration:190,ease:'inCubic',onComplete:()=>old.remove()});
-  });
-  host.querySelectorAll('.reel-new').forEach(fresh=>{
-    motion(fresh,{translateY:[15,0],opacity:[0,1],duration:240,delay:80,ease:'outCubic'});
-  });
-  const popped=host.querySelectorAll('.trace-var.changed');
-  if(popped.length)motion(popped,{scale:[1.1,1],duration:420,delay:stagger(40),ease:'outBack'});
+  // Unchanged values stay perfectly still, so the eye only follows what moved: old value
+  // lifts away while the new one rises in. When the jump crossed steps, the sweep below
+  // owns this panel and plays that same transition once per crossed step, ending here.
+  if(!(trace.skip&&trace.skip.length))playVarReel(host,1);
   const now=host.querySelector('.ts-line.now');
   if(now)motion(now,{opacity:[.35,1],translateX:[-10,0],duration:280,ease:'outCubic'});
   const frames=host.querySelectorAll('.ts-frame');
@@ -1789,32 +1783,17 @@ function renderTraceScreen(){
     path.style.strokeDasharray=len; path.style.strokeDashoffset=len;
     motion(path,{strokeDashoffset:[len,0],duration:460,delay:280,ease:'outCubic'});
   });
-  playSkipBurst(host,trace);
+  replaySkippedVars(host,trace,spot.raw);
   bindGraphNav(host);
   const seek=host.querySelector('[data-trace-seek]');
   if(seek)seek.oninput=event=>{clearInterval(traceTimer);traceTimer=null;current.trace.playing=false;traceGoto(Number(event.target.value)-1);};
 }
 /* ------------------------------------------------------------- 跳过的那些步 --
- * 跳行模式一次可能跨过几十个原始步骤。与其直接瞬移，不如把这段里发生的值变化快速播
- * 一遍：一个值一帧地掠过并上浮淡出，读起来就是「这里循环又空转了 20 圈」。
+ * 跳行模式一次可能跨过几十个原始步骤。与其直接瞬移，不如让「变量」面板按这些被跨过的
+ * 步快速重播它自己的动画：旧值上浮、新值升起，一格一格地滚过去，读起来就是
+ * 「这里循环又跑了 39 圈」。最后停在真正的目标步上。
  */
-// 同时活着的牌不超过三张，多了就糊成一团；总量由徽标交代。
-const SKIP_CHIPS=14;
-/** What the skipped steps actually did, one entry per thing worth seeing. */
-function skipBurst(steps,skipped){
-  const items=[];
-  let printed='';
-  for(const {raw,step} of skipped){
-    const before=steps[raw-1];
-    for(const change of changedValues(before,step))items.push({kind:'var',name:change.name,value:change.to});
-    const from=before?.stack?.length??0,to=step.stack?.length??0;
-    if(to>from)items.push({kind:'call',name:(step.stack[to-1]||'?')+'()',value:''});
-    else if(to<from)items.push({kind:'ret',name:(before?.stack?.[from-1]||'?')+' 返回',value:''});
-    if((step.output||'').length>(before?.output||'').length)printed=(step.output||'').slice(-48);
-  }
-  if(printed)items.push({kind:'out',name:'输出',value:printed.replace(/\n/g,'⏎')});
-  return items;
-}
+let skipReplayTimer=null;
 /** "跳过 23 步" plus the line that repeated, which is the loop that ran. */
 function skipBadge(skipped){
   const per=new Map();
@@ -1823,32 +1802,64 @@ function skipBadge(skipped){
   for(const [l,c] of per)if(c>count){line=l;count=c;}
   return count>2?'跳过 '+skipped.length+' 步 · 第 '+line+' 行重复 '+count+' 次':'跳过 '+skipped.length+' 步';
 }
-function skipHTML(trace){
-  const skipped=trace.skip;
-  if(!skipped||!skipped.length)return '';
-  const items=skipBurst(trace.steps,skipped);
-  const badge='<span class="ts-skip-badge">'+esc(skipBadge(skipped))+'</span>';
-  if(!items.length)return '<div class="ts-skip">'+badge+'</div>';
-  const shown=items.slice(0,SKIP_CHIPS);
-  return '<div class="ts-skip">'+badge+'<div class="ts-skip-slot">'+
-    shown.map((it,i)=>'<span class="ts-skip-chip '+it.kind+'">'+esc(it.name)+(it.value!==''?'<b>'+esc(it.value)+'</b>':'')+'</span>').join('')+
-    (items.length>shown.length?'<span class="ts-skip-chip more">+'+(items.length-shown.length)+'</span>':'')+
-  '</div></div>';
+/** The 变量 cards for one step, with the value reel ready to animate. */
+function varsHTML(step,previous){
+  const changes=changedValues(previous,step);
+  const grouped=groupVars(step.vars);
+  if(!grouped.scalars.length)return '<span class="trace-none">这一步还没有可见的变量</span>';
+  return grouped.scalars.map(v=>traceVarHTML(v,changes.find(c=>c.name===v.name))).join('');
 }
-/** One value per frame, rising and fading: fast enough to blur, slow enough to read. */
-function playSkipBurst(host,trace){
-  const layer=host.querySelector('.ts-skip');
-  if(!layer||!trace.skip?.length)return;
-  if(reducedMotion.matches){layer.classList.add('static');return;}
-  const chips=layer.querySelectorAll('.ts-skip-chip');
-  // 每张牌活得短、间隔小：读起来是一串掠过的值，而不是一叠盖在一起的标签。
-  const gap=Math.max(38,Math.min(90,640/Math.max(1,chips.length)));
-  motion(chips,{translateY:[14,-34],opacity:[0,1,0],duration:Math.round(gap*2.6),delay:stagger(gap),ease:'outCubic'});
-  const badge=layer.querySelector('.ts-skip-badge');
-  if(badge)motion(badge,{opacity:[0,1],translateY:[-5,0],duration:240,ease:'outCubic'});
+/** The reel animation, at the speed the caller asks for. */
+function playVarReel(host,scale=1){
+  host.querySelectorAll('.reel-old').forEach(old=>{
+    motion(old,{translateY:[-15],opacity:[1,0],duration:190*scale,ease:'inCubic',onComplete:()=>old.remove()});
+  });
+  host.querySelectorAll('.reel-new').forEach(fresh=>{
+    motion(fresh,{translateY:[15,0],opacity:[0,1],duration:240*scale,delay:80*scale,ease:'outCubic'});
+  });
+  const popped=host.querySelectorAll('.trace-var.changed');
+  if(popped.length)motion(popped,{scale:[1.1,1],duration:420*scale,delay:stagger(40*scale),ease:'outBack'});
+}
+function stopSkipReplay(){clearInterval(skipReplayTimer);skipReplayTimer=null;}
+/**
+ * Sweep the 变量 panel through the steps the jump crossed.
+ *
+ * The destination is painted first, so the panel is never wrong if the sweep is cut short;
+ * the replay then re-paints each crossed step in turn and lands back on that destination.
+ * Long jumps are sampled rather than played frame by frame, so the sweep stays about a
+ * second no matter how many iterations the loop actually ran.
+ */
+function replaySkippedVars(host,trace,targetRaw){
+  const skipped=trace.skip;
+  const box=host.querySelector('.ts-vars');
+  if(!skipped||!skipped.length||!box)return;
+  const destination=box.innerHTML;
+  const frames=[];
+  const stride=Math.max(1,Math.ceil(skipped.length/16));
+  for(let i=0;i<skipped.length;i+=stride)frames.push(skipped[i]);
+  const lastFrame=skipped[skipped.length-1];
+  if(frames[frames.length-1]!==lastFrame)frames.push(lastFrame);
+  const paint=entry=>{
+    box.innerHTML=varsHTML(entry.step,trace.steps[entry.raw-1]);
+    playVarReel(host,.34);
+  };
+  const gap=Math.max(38,Math.min(100,760/Math.max(1,frames.length)));
+  let at=0;
+  paint(frames[0]);at=1;
+  stopSkipReplay();
+  skipReplayTimer=setInterval(()=>{
+    if(at>=frames.length){
+      stopSkipReplay();
+      box.innerHTML=destination;
+      playVarReel(host,.34);
+      return;
+    }
+    paint(frames[at++]);
+  },gap);
 }
 function renderTrace(){
   const trace=current?.trace;
+  // 画板打开时它才是主角，别在下面重复渲染一遍。
   if(trace?.canvas&&trace.status==='ready'&&$('[data-graph-screen]')){renderGraphScreen();return;}
   if(trace?.fullscreen&&trace.status==='ready'&&$('[data-trace-screen]'))return renderTraceScreen();
   const host=$('[data-bottom-body]');

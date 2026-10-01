@@ -187,26 +187,7 @@ input,textarea,select{transition:border-color var(--t-fast) var(--ease),box-shad
 
 
 .ts-stack{display:flex;align-items:center;gap:8px;padding:10px 40px;border-bottom:1px solid #f2f2f2;flex:none;flex-wrap:wrap;min-height:44px}
-/* 跳行时被跨过的值：一个槽位一张牌，逐张上浮淡出，不占布局。 */
-.ts-screen{position:relative}
-.tscreen{position:relative}
-/* 放在代码区下方的空白带里：那里平时什么都没有，不会压住预览条或代码。 */
-.ts-skip{position:absolute;left:0;right:0;bottom:64px;height:0;pointer-events:none;z-index:6}
-.ts-skip-slot{position:relative;height:0;display:flex;justify-content:center}
-.ts-skip-chip{position:absolute;top:0;opacity:0;white-space:nowrap;padding:3px 10px;border-radius:8px;
-  background:#eef6ff;border:1px solid #cfe4ff;color:#1686ef;font:600 11.5px/1.5 var(--font-mono)}
-.ts-skip-chip b{color:#0f6fd0;margin-left:6px}
-.ts-skip-chip.call{background:#f4f1ff;border-color:#ded4ff;color:#7a5af8}
-.ts-skip-chip.call b{color:#6a45f0}
-.ts-skip-chip.ret{background:#f5f6f8;border-color:#e6e6e8;color:#6b7280}
-.ts-skip-chip.out{background:#eefaf1;border-color:#cdeed9;color:#1f9d55}
-.ts-skip-chip.out b{color:#17794a}
-.ts-skip-chip.more{background:#fff4e0;border-color:#f0d29b;color:#9c7625}
-.ts-skip-badge{position:absolute;top:-58px;left:50%;transform:translateX(-50%);opacity:0;white-space:nowrap;
   font-size:11px;color:#9aa0a6;background:#fff;padding:1px 8px;border-radius:6px;border:1px solid #f0f0f0}
-.ts-skip.static .ts-skip-badge{opacity:1}
-.ts-skip.static .ts-skip-chip{opacity:0}
-@media(prefers-reduced-motion:reduce){.ts-skip-chip{display:none}}
 .ts-stack-label{font-size:11px;color:#b0b0b0}
 .ts-frame{background:#f5f6f8;border:1px solid #e8e8ea;border-radius:6px;padding:3px 10px;font-family:var(--font-mono);font-size:12px;color:#555}
 .ts-frame.active{background:#e9f4ff;border-color:#b9dcff;color:#1686ef;font-weight:600}
@@ -276,6 +257,9 @@ input,textarea,select{transition:border-color var(--t-fast) var(--ease),box-shad
 .ts-dot{width:8px;height:8px;border-radius:50%;background:#17a34a;box-shadow:0 0 0 4px #17a34a22}
 .ts-title{font-size:13px;font-weight:600;color:#262626;letter-spacing:-.2px}
 .ts-step{font-size:12px;color:#8c8c8c;font-variant-numeric:tabular-nums}
+/* 跳行时跨过的步数：放在标题行，不占额外版面。 */
+.ts-skip-note{font-size:11px;color:#9c7625;background:#fff4e0;border:1px solid #f0d29b;
+  border-radius:6px;padding:2px 8px;white-space:nowrap}
 .ts-head .grow{flex:1}
 .ts-btn{font-size:12px;padding:6px 12px;background:#f5f5f5;color:#666;border-radius:7px}
 .ts-btn:hover{background:#ececec;color:#262626}
