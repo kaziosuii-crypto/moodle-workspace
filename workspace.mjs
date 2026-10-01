@@ -941,6 +941,14 @@ function tracePlay(){
     renderTrace();
   },560);
 }
+function traceVarHTML(v){
+  if(v.kind==='s')return '<span class="trace-var"><b>'+esc(v.name)+'</b><span>'+esc(v.value||'""')+'</span></span>';
+  if(v.kind==='c'){
+    const code=Number(v.value)||0;
+    return '<span class="trace-var"><b>'+esc(v.name)+'</b><span>'+esc("'"+String.fromCharCode(code)+"'")+'<i>'+code+'</i></span></span>';
+  }
+  return '<span class="trace-var"><b>'+esc(v.name)+'</b><span>'+esc(v.value)+'</span></span>';
+}
 function renderTrace(){
   const host=$('[data-bottom-body]');
   if(!host)return;
@@ -959,6 +967,9 @@ function renderTrace(){
       '<span class="trace-count">'+esc(describeStep(trace.steps,trace.index))+'</span>'+
     '</div>'+
     '<div class="trace-progress"><span style="width:'+pct+'%"></span></div>'+
+    '<div class="trace-vars">'+(step.vars&&step.vars.length
+      ? step.vars.map(traceVarHTML).join('')
+      : '<span class="trace-none">这一步还没有可见的变量</span>')+'</div>'+
     '<div class="trace-body">'+
       '<label class="field"><span class="field-head">本步之前的输出</span><pre class="trace-out">'+eolMark(step.output||'（还没有输出）')+'</pre></label>'+
       '<label class="field"><span class="field-head">程序最终输出</span><pre class="trace-out">'+eolMark(trace.finalOutput||'（没有输出）')+'</pre></label>'+
@@ -982,10 +993,15 @@ async function startTrace(){
     const {stdout}=await runCModule(module,input);
     const {steps,finalOutput}=parseTrace(stdout);
     if(!steps.length)throw new Error('没有记录到任何执行步骤，代码可能一进入就退出了。');
+    if(steps.length>=20000)toast('执行步数过多，只记录了前 20000 步。');
     current.trace={status:'ready',steps,finalOutput,index:0,playing:false};
     traceHighlight(steps[0].line);
   }catch(error){
-    current.trace={status:'error',error:error.message};
+    // Two ways a runaway program is stopped: the sandbox deadline, and the
+    // 20000-step ceiling baked into the instrumented source.
+    current.trace={status:'error',error:error.timeout
+      ? '代码执行超过 6 秒仍未结束，很可能陷入了死循环。已强制中断，工作区没有卡住。'
+      : error.message};
   }finally{setBusy(false);}
   renderTrace();
 }
