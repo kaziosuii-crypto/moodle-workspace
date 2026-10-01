@@ -25,7 +25,17 @@ self.onmessage=async function(event){
   try{
     if(msg.type==='init'){
       patchFetch(msg.cached);
-      shim=await import(msg.shim);
+      // Import the two modules actually used instead of the index.js barrel:
+      // the barrel also re-exports fs_opfs.js, and something in that graph calls
+      // importScripts(), which a module worker refuses.
+      const wasiModule=await import(msg.wasi);
+      const fsModule=await import(msg.fs);
+      shim={
+        WASI:wasiModule.WASI||wasiModule.default,
+        OpenFile:fsModule.OpenFile,
+        File:fsModule.File,
+        ConsoleStdout:fsModule.ConsoleStdout
+      };
       ready=true;
       self.postMessage({id:msg.id,type:'ready'});
       return;

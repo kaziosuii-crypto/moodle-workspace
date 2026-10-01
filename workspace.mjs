@@ -883,7 +883,8 @@ async function runOnline(source,stdin){
 // shim. Nothing is sent to a server. The ~90 MB payload is fetched once on first use
 // and then served from the browser cache, so this is the offline-capable backend.
 const WASM_TOOLCHAIN='https://cdn.jsdelivr.net/npm/browsercc@0.1.1/dist/index.js';
-const WASI_SHIM='https://cdn.jsdelivr.net/npm/@bjorn3/browser_wasi_shim@0.4.2/dist/index.js';
+const WASI_SHIM='https://cdn.jsdelivr.net/npm/@bjorn3/browser_wasi_shim@0.4.2/dist/wasi.js';
+const WASI_SHIM_FS='https://cdn.jsdelivr.net/npm/@bjorn3/browser_wasi_shim@0.4.2/dist/fs_mem.js';
 let cToolchain=null;
 async function loadToolchain(onProgress){
   if(cToolchain)return cToolchain;
@@ -1055,7 +1056,7 @@ async function ensureSandbox(){
   if(cSandbox)return cSandbox;
   const sandbox=openSandbox();
   try{
-    const reply=await sandbox.call({type:'init',shim:WASI_SHIM,cached:[...tcURLs]},45000);
+    const reply=await sandbox.call({type:'init',wasi:WASI_SHIM,fs:WASI_SHIM_FS,cached:[...tcURLs]},45000);
     if(reply.type!=='ready')throw new Error(reply.message||('沙箱返回了 '+reply.type));
   }
   catch(error){
