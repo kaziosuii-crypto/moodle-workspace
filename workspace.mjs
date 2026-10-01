@@ -1086,11 +1086,14 @@ function bindGraphNav(host){
 function fitGraph(){
   const wrap=$('.ts-graphwrap'),g=$('.ts-graph'),view=current?.trace?.view;
   if(!wrap||!g||!view)return;
-  const w=g.offsetWidth||1,h=g.offsetHeight||1;
-  const availW=Math.max(120,wrap.clientWidth-80),availH=Math.max(120,wrap.clientHeight-24);
+  const w=g.offsetWidth,h=g.offsetHeight;
+  const availW=Math.max(160,wrap.clientWidth-70);
+  const availH=Math.max(160,wrap.clientHeight-30||(window.innerHeight||800)-220);
+  if(!w||!h)return false;
   view.zoom=Math.max(.15,Math.min(1,Math.min(availW/w,availH/h)));
   view.x=0;view.y=0;
   applyGraphView();
+  return true;
 }
 function graphScreenHTML(){
   const trace=current.trace,spot=traceSpot();
@@ -1128,7 +1131,9 @@ function openGraphScreen(){
   renderGraphScreen();
   motion(host,{opacity:[0,1],duration:220});
   bindGraphNav(host);
-  requestAnimationFrame(()=>fitGraph());
+  // The overlay has no size until it has been laid out, so retry once.
+  requestAnimationFrame(()=>{ if(!fitGraph())requestAnimationFrame(()=>fitGraph()); });
+  window.addEventListener('resize',()=>{ if($('[data-graph-screen]'))fitGraph(); },{once:true});
   setTimeout(()=>host.focus(),30);
 }
 function closeGraphScreen(){
@@ -1184,6 +1189,24 @@ function graphHTML(nodes,prev,options){
     for(const n of order){const node=graph.node('n:'+n.addr);pos.set(n.addr,{x:node.x-W/2,y:node.y-H/2});}
     for(const v of pointers){const node=graph.node('p:'+v.name);if(node)pos.set('p:'+v.name,{x:node.x-CW/2,y:node.y-CH/2});}
     width=(graph.graph().width||400)+8; height=(graph.graph().height||200)+8;
+    // dagre gives one long rank per list node; fold that strip into rows so the
+    // structure fits a window instead of stretching thousands of pixels wide.
+    const targetW=Math.max(560,Math.min(1500,(window.innerWidth||1200)-260));
+    if(width>targetW*1.5&&order.length>4){
+      const perRow=Math.max(2,Math.floor((targetW+GX)/(W+GX)));
+      const ranked=order.slice().sort((a,b)=>pos.get(a.addr).x-pos.get(b.addr).x);
+      ranked.forEach((n,i)=>{
+        const row=Math.floor(i/perRow),col=i%perRow;
+        pos.set(n.addr,{x:col*(W+GX)+2,y:row*(H+GY)+40});
+      });
+      for(const v of pointers){
+        const target=pos.get(v.value);
+        if(!target)continue;
+        pos.set('p:'+v.name,{x:target.x+W-CW,y:Math.max(0,target.y-30)});
+      }
+      width=perRow*W+(perRow-1)*GX+4;
+      height=Math.ceil(ranked.length/perRow)*(H+GY)+20;
+    }
   }
   let chips='',chipsEdges='',lost=0;
   pointers.forEach(v=>{
@@ -1193,7 +1216,12 @@ function graphHTML(nodes,prev,options){
     if(!at)return;
     chips+='<div class="ts-ptr'+(moved?' moved':'')+'" style="left:'+at.x+'px;top:'+at.y+'px;width:'+CW+'px;height:'+CH+'px">'+esc(v.name)+'</div>';
     const target=pos.get(v.value);
-    if(target)chipsEdges+='<path class="ts-edge ptr'+(moved?' new':'')+'" marker-end="url(#ts-head)" d="M'+(at.x+CW/2)+' '+(at.y+CH)+' L'+(target.x+W/2)+' '+(target.y)+'"/>';
+    if(target){
+      const ax=at.x+CW/2,ay=at.y+CH/2,bx=target.x+W/2,by=target.y+H/2,dx=bx-ax,dy=by-ay;
+      const cut=(hw,hh)=>Math.min(dx?hw/Math.abs(dx):1e9,dy?hh/Math.abs(dy):1e9);
+      const t1=cut(CW/2+6,CH/2+6),t2=cut(W/2+11,H/2+11);
+      chipsEdges+='<path class="ts-edge ptr'+(moved?' new':'')+'" marker-end="url(#ts-head)" d="M'+(ax+dx*t1).toFixed(1)+' '+(ay+dy*t1).toFixed(1)+' L'+(bx-dx*t2).toFixed(1)+' '+(by-dy*t2).toFixed(1)+'"/>';
+    }
     else chipsEdges+='<text class="ts-null" x="'+(at.x+CW/2)+'" y="'+(at.y+CH+14)+'">→ ?</text>';
   });
   if(lost)height+=34;
@@ -1274,7 +1302,7 @@ function renderTraceScreen(){
       '<div class="ts-stack">'+stackHTML(spot.step.stack,spot.step.returns)+'</div>'+
       (spot.step.nodes.length?'<div class="ts-preview">'+'<div class="ts-graphwrap preview">'+graphHTML(spot.step.nodes,graphKeys(spot.previous&&spot.previous.nodes),graphOptions(spot,true))+
         '</div><div class="ts-preview-bar">'+'<span class="ts-preview-note">预览，只显示前 '+Math.min(8,spot.step.nodes.length)+' 个节点</span>'+
-        '<button class="ts-canvas-open" data-action="graph-full">打开数据画板 · 共 '+spot.step.nodes.length+' 个节点</button></div>':'')+
+        '<button class="ts-canvas-open" data-action="graph-full">打开数据画板 · 共 '+spot.step.nodes.length+' 个节点</button></div></div>':'')+
       '<div class="ts-body">'+
         '<div class="ts-code">'+traceCodeHTML(spot.step.line,4)+'</div>'+
         '<div class="ts-side">'+
