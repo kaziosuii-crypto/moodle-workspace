@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
 import { readFileSync } from 'node:fs';
-import { cleanSuggestion, copilotPrompt } from './copilot.mjs';
+import { cleanSuggestion, copilotPrompt, copilotWorthAsking } from './copilot.mjs';
 import { ioText, richContent, formatTime, parseProblem, parseNavigation, parseResult, safeURL } from './adapter.mjs';
 import { parseTutorResponse, tutorNarrative, tutorPrompt } from './tutor.mjs';
 const base='http://example.test/moodle/mod/programming/view.php?a=117';
@@ -90,6 +90,17 @@ test('内联补全会剥掉代码围栏，并去掉模型重复的那一行',()=
   assert.equal(cleanSuggestion('int x = 0;','    in',''),'t x = 0;');
   assert.equal(cleanSuggestion('  \n  ','int a;',''),'');
 });
+test('最后一个大括号之后不再请求补全',()=>{
+  const done='int main(void) {\n    return 0;\n}\n';
+  assert.equal(copilotWorthAsking(done,done.length),false);          // 文件结尾的空行
+  assert.equal(copilotWorthAsking(done,done.indexOf('\n}')),true);  // 函数体里面
+  assert.equal(copilotWorthAsking('int ma','int ma'.length),true);   // 文件作用域写了一半
+  assert.equal(copilotWorthAsking('struct P { int x; };\n','struct P { int x; };\n'.length),false);
+  // 大括号出现在字符串或注释里时不能算数
+  assert.equal(copilotWorthAsking('// }\nint ma','// }\nint ma'.length),true);
+  assert.equal(copilotWorthAsking('/* } */\nint main(void) {\n    ','/* } */\nint main(void) {\n    '.length),true);
+});
+
 test('内联补全的提示带着题干、光标前后的代码和一个明确的光标位',()=>{
   const prompt=copilotPrompt({prefix:'int main(void) {\n    int sum = 0;\n',suffix:'\n    return 0;\n}',statement:'读入 n 个数求和'});
   assert.match(prompt,/读入 n 个数求和/);

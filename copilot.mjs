@@ -77,6 +77,33 @@ export function cleanSuggestion(raw, prefix, suffix) {
   return lines.length > MAX_LINES ? lines.slice(0, MAX_LINES).join('\n') : text;
 }
 
+/**
+ * Whether the caret sits somewhere a continuation makes sense at all.
+ *
+ * Past the closing brace of the last function there is nothing to continue, and asking
+ * anyway costs a request and drops grey text over empty space. Inside a function the
+ * answer is always yes; at file scope only a half-written line is worth finishing.
+ */
+export function copilotWorthAsking(text, pos) {
+  const source = String(text ?? '');
+  const at = Math.max(0, Math.min(Number(pos) || 0, source.length));
+  let depth = 0, quote = '', lineComment = false, blockComment = false;
+  for (let i = 0; i < at; i++) {
+    const c = source[i], next = source[i + 1];
+    if (lineComment) { if (c === '\n') lineComment = false; continue; }
+    if (blockComment) { if (c === '*' && next === '/') { blockComment = false; i++; } continue; }
+    if (quote) { if (c === '\\') i++; else if (c === quote) quote = ''; continue; }
+    if (c === '/' && next === '/') { lineComment = true; i++; continue; }
+    if (c === '/' && next === '*') { blockComment = true; i++; continue; }
+    if (c === '"' || c === "'") { quote = c; continue; }
+    if (c === '{') depth++;
+    else if (c === '}') depth--;
+  }
+  if (depth > 0) return true;
+  const typed = source.slice(source.lastIndexOf('\n', at - 1) + 1, at).trim();
+  return typed !== '' && !/[;}]$/.test(typed);
+}
+
 /** One inline suggestion. Resolves to '' when the model had nothing to add. */
 export async function suggest({ prefix, suffix, statement, signal, onDelta }) {
   let raw;

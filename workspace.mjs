@@ -18,7 +18,7 @@ import { instrument, parseTrace, describeStep, viewIndices, changedNames, change
 import { animate, stagger } from 'animejs';
 import { AI_CONFIG } from './ai-config.mjs';
 import { llm } from './ai.mjs';
-import { suggest as aiSuggest, cleanSuggestion } from './copilot.mjs';
+import { suggest as aiSuggest, cleanSuggestion, copilotWorthAsking } from './copilot.mjs';
 import { TUTOR_SYSTEM, parseTutorResponse, tutorNarrative, tutorPrompt } from './tutor.mjs';
 
 // CodeMirror and every extension share one bundled state/view instance.
@@ -401,6 +401,8 @@ async function runCopilot(view,pos){
   const doc=view.state.doc,text=doc.toString();
   const prefix=text.slice(0,pos);
   if(!prefix.trim())return;
+  // 最后一个右大括号之后没有任何东西可续写，问也是在空白上糊灰字。
+  if(!copilotWorthAsking(text,pos))return;
   copilot.controller?.abort();
   const controller=new AbortController();
   copilot.controller=controller;

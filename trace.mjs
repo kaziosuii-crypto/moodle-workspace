@@ -14,6 +14,7 @@
  * printing it.
  */
 const MARK = '__WS_STEP__';
+const MARK_PREFIXES = [MARK, '__WS_CALL__', '__WS_RET__', '__WS_NODE__', '__WS_READ__'];
 const STEP_CAP = 20000;
 
 /** Format specifier and rendering kind for a declaration specifier list. */
@@ -272,6 +273,32 @@ export function instrument(source) {
   // counter belongs to the loop statement, so it is parked here until the body is
   // emitted and then handed to that body's scope instead of the enclosing one.
   let pendingFor = [], pendingForSet = -1, inlineFor = null;
+  // A head written Allman-style ("static void f(void)" then "{" on the next line) has
+  // no brace on its own line, so it has to be held here until that brace shows up.
+  let pendingHead = null;
+  /** Open a function's body scope, declare its parameters, and announce the call. */
+  const enterFunction = (fn, headIndent) => {
+    functionBase = braceDepth;
+    // The stars belong to the return type, and a pointer return has no safe printf
+    // format, so only its exit is marked.
+    const retType = (fn[1] + fn[2]).trim();
+    currentFunction = { name: fn[3], ret: /\*/.test(retType) ? null : specifierOf(retType) };
+    for (const part of splitTop(fn[4], ',')) {
+      const param = part.trim();
+      for (const variable of declarationsIn(param + ';')) scopes[scopes.length - 1].push(variable);
+      // A struct pointer parameter is a real graph node - for a recursive tree walk
+      // it is the only thing that shows which subtree the call is working on.
+      for (const variable of structPtrVars(param)) scopes[scopes.length - 1].push(variable);
+    }
+    const scope = scopes[scopes.length - 1];
+    // A parameter always holds a value the caller supplied, so its guard starts up.
+    for (const variable of scope) if (variable.kind === 'p') out.push(headIndent + '  int __ws_def_' + variable.name + '=1;');
+    // fieldsOf, not the variable itself: a pointer has no fmt of its own, and that
+    // undefined format is what a pointer parameter used to put straight into printf.
+    const fields = scope.flatMap(v => fieldsOf(v));
+    out.push(headIndent + '  printf("__WS_CALL__%s' + (fields.length ? '|' + fields.map(f => f.kind + ':' + f.label + '=' + f.fmt).join('|') : '') + '\\n","' + fn[3] + '"' +
+      (fields.length ? ',' + fields.map(f => f.expr).join(',') : '') + ');');
+  };
   let currentFunction = null;
   // Instrumentation is only valid inside a function body. A struct / union / enum
   // definition also opens a brace at file scope, so brace count alone cannot tell
@@ -385,30 +412,14 @@ export function instrument(source) {
       if (opens > 0) scopes[scopes.length - 1].push(variable);
       else { pendingFor.push(variable); pendingForSet = i; }
     }
-    // A function header both opens the body's scope and declares its parameters.
-    const fn = !isFunctionHead ? null : body.match(FUNCTION);
-    if (fn) {
-      functionBase = braceDepth;
-      // The stars belong to the return type, and a pointer return has no safe printf
-      // format, so only its exit is marked.
-      const retType = (fn[1] + fn[2]).trim();
-      currentFunction = { name: fn[3], ret: /\*/.test(retType) ? null : specifierOf(retType) };
-      for (const part of splitTop(fn[4], ',')) {
-        const param = part.trim();
-        for (const variable of declarationsIn(param + ';')) scopes[scopes.length - 1].push(variable);
-        // A struct pointer parameter is a real graph node - for a recursive tree walk
-        // it is the only thing that shows which subtree the call is working on.
-        for (const variable of structPtrVars(param)) scopes[scopes.length - 1].push(variable);
-      }
-      const scope = scopes[scopes.length - 1];
-      // A parameter always holds a value the caller supplied, so its guard starts up.
-      for (const variable of scope) if (variable.kind === 'p') out.push(indent + '  int __ws_def_' + variable.name + '=1;');
-      // fieldsOf, not the variable itself: a pointer has no fmt of its own, and that
-      // undefined format is what a pointer parameter used to put straight into printf.
-      const fields = scope.flatMap(v => fieldsOf(v));
-      out.push(indent + '  printf("__WS_CALL__%s' + (fields.length ? '|' + fields.map(f => f.kind + ':' + f.label + '=' + f.fmt).join('|') : '') + '\\n","' + fn[3] + '"' +
-        (fields.length ? ',' + fields.map(f => f.expr).join(',') : '') + ');');
-    }
+    // A function header both opens the body's scope and declares its parameters. When
+    // the brace is on the next line the head is parked here and registered the moment
+    // that brace arrives; treating it as file scope instead left the whole body with no
+    // markers at all, which is exactly the "no statements to step through" report.
+    const sameLineHead = isFunctionHead ? body.match(FUNCTION) : null;
+    if (sameLineHead) enterFunction(sameLineHead, indent);
+    else if (pendingHead) { if (opens > 0) enterFunction(pendingHead.fn, pendingHead.indent); pendingHead = null; }
+    else if (braceDepth === 0 && opens === 0 && /[)]\s*$/.test(body) && FUNCTION.test(body)) pendingHead = { fn: body.match(FUNCTION), indent };
     // A counter parked for a body that never arrived would leak into whatever block is
     // emitted next; dropping it is the safe direction.
     if (pendingFor.length && pendingForSet !== i) { pendingFor = []; pendingForSet = -1; }
@@ -451,12 +462,28 @@ function parseField(field) {
 export function parseTrace(stdout) {
   const steps = [];
   const stack = [];
-  const lines = [];
+  let out = '';
+  let dropNewline = false;
   let last = null;
-  for (const line of String(stdout || '').split('\n')) {
+  // Markers share stdout with the program, so a printf without a trailing newline leaves
+  // the next marker in the middle of a line. Splitting whole lines therefore missed it and
+  // the marker text was printed as if the program had written it. Split on markers
+  // wherever they appear instead: every marker prints its own newline, so dropping that
+  // newline together with the marker is what keeps the program's output byte-identical.
+  const pieces = String(stdout || '').split(/(__WS_(?:STEP|CALL|RET|READ|NODE)__[^\n]*)/g);
+  for (const piece of pieces) {
+    if (!piece) continue;
+    const isMarker = MARK_PREFIXES.some(prefix => piece.startsWith(prefix));
+    if (!isMarker) {
+      if (dropNewline) { dropNewline = false; out += piece[0] === '\n' ? piece.slice(1) : piece; }
+      else out += piece;
+      continue;
+    }
+    dropNewline = true;
+    const line = piece;
     if (line.startsWith(MARK)) {
       const fields = line.slice(MARK.length).split('|');
-      steps.push({ line: Number(fields[0]) || 0, vars: fields.slice(1).map(parseField).filter(Boolean), output: lines.join('\n'), stack: stack.map(f => f.name), reads: [], returns: [], nodes: [] });
+      steps.push({ line: Number(fields[0]) || 0, vars: fields.slice(1).map(parseField).filter(Boolean), output: out, stack: stack.map(f => f.name), reads: [], returns: [], nodes: [] });
       last = steps[steps.length - 1];
       continue;
     }
@@ -489,9 +516,9 @@ export function parseTrace(stdout) {
       if (last && bar > 0) last.reads.push({ name: body.slice(0, bar), index: Number(body.slice(bar + 1)) });
       continue;
     }
-    lines.push(line);
+    // 走到这里说明前缀和具体分支对不上，丢掉总比把 marker 当成程序输出安全。
   }
-  return { steps, finalOutput: lines.join('\n') };
+  return { steps, finalOutput: out };
 }
 
 /**
