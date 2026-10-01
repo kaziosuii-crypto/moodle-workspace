@@ -2,14 +2,15 @@
 // @name         Moodle Workspace · CodeMirror 6
 // @name:zh-CN   Moodle 编程工作区
 // @namespace    https://github.com/kaziosuii-crypto/moodle-workspace
-// @version      6.0.1
+// @version      6.0.2
 // @description  CodeMirror 6 工作区、AI 逐行辅导、本地 WASM 编译运行、结构化判题与流畅动画
 // @author       Ziheng
 // @license      MIT
 // @homepageURL  https://github.com/kaziosuii-crypto/moodle-workspace
 // @supportURL   https://github.com/kaziosuii-crypto/moodle-workspace/issues
-// @updateURL    https://cdn.jsdelivr.net/gh/kaziosuii-crypto/moodle-workspace@main/code.user.js
-// @downloadURL  https://cdn.jsdelivr.net/gh/kaziosuii-crypto/moodle-workspace@main/code.user.js
+// @updateURL    https://raw.githubusercontent.com/kaziosuii-crypto/moodle-workspace/main/code.user.js
+// @downloadURL  https://raw.githubusercontent.com/kaziosuii-crypto/moodle-workspace/main/code.user.js
+// @cdnFallback  https://cdn.jsdelivr.net/gh/kaziosuii-crypto/moodle-workspace@main/code.user.js
 // @match        *://*/moodle/mod/programming/*
 // @match        *://*/mod/programming/*
 // @grant        none

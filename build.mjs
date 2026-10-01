@@ -5,6 +5,10 @@ import { REPO } from './repo.config.mjs';
 const pkg = JSON.parse(await readFile('package.json', 'utf8'));
 const gh = REPO.github.user, gt = REPO.gitee.user;
 const cdn = gh ? 'https://cdn.jsdelivr.net/gh/' + gh + '/' + REPO.github.repo + '@main/code.user.js' : '';
+// raw.githubusercontent is the update channel: jsDelivr keeps serving a stale
+// @main alias for hours even after a purge, and a static @updateURL cannot point
+// at a version tag. jsDelivr stays documented as a fallback for blocked networks.
+const raw = gh ? 'https://raw.githubusercontent.com/' + gh + '/' + REPO.github.repo + '/main/code.user.js' : '';
 const gitee = gt ? 'https://gitee.com/' + gt + '/' + REPO.gitee.repo + '/raw/master/code.user.js' : '';
 const home = gh ? 'https://github.com/' + gh + '/' + REPO.github.repo
                 : (gt ? 'https://gitee.com/' + gt + '/' + REPO.gitee.repo : '');
@@ -20,11 +24,9 @@ const header = [
   '// @license      MIT',
   home ? '// @homepageURL  ' + home : '',
   home ? '// @supportURL   ' + home + '/issues' : '',
-  // Gitee raw answers 403 to every non-browser fetch, so it cannot serve an
-  // update channel. jsDelivr over the GitHub repo does, and publish.mjs purges
-  // its cache after each push so a new version is visible immediately.
-  (cdn || gitee) ? '// @updateURL    ' + (cdn || gitee) : '',
-  (cdn || gitee) ? '// @downloadURL  ' + (cdn || gitee) : '',
+  (raw || cdn || gitee) ? '// @updateURL    ' + (raw || cdn || gitee) : '',
+  (raw || cdn || gitee) ? '// @downloadURL  ' + (raw || cdn || gitee) : '',
+  cdn ? '// @cdnFallback  ' + cdn : '',
   '// @match        *://*/moodle/mod/programming/*',
   '// @match        *://*/mod/programming/*',
   '// @grant        none',

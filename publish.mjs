@@ -50,9 +50,9 @@ if (REPO.github.user && ghToken) {
   // Never let one platform abort the other, and never echo the token in an error.
   try { git(['push', '--quiet', '--force', 'https://' + u + ':' + ghToken + '@github.com/' + u + '/' + r + '.git', 'HEAD:main']); }
   catch { console.log('github push FAILED — create the repo at https://github.com/new first (name: ' + r + ', public, no README), then run publish.mjs again.'); }
-  // jsDelivr caches @main for hours; purge so the new version is live at once.
-  const purge = await api('https://purge.jsdelivr.net/gh/' + u + '/' + r + '@main/code.user.js', { method: 'GET' });
-  console.log('jsdelivr purge: ' + (purge.ok ? 'ok' : 'status ' + purge.status));
+  // Tag every release so version-pinned jsDelivr URLs also resolve.
+  try { git(['tag', '-f', 'v' + pkg.version]); git(['push', '--quiet', '--force', 'https://' + u + ':' + ghToken + '@github.com/' + u + '/' + r + '.git', 'refs/tags/v' + pkg.version]); } catch { console.log('tag push skipped'); }
+  await api('https://purge.jsdelivr.net/gh/' + u + '/' + r + '@main/code.user.js', { method: 'GET' }).catch(() => {});
   console.log('github: https://github.com/' + u + '/' + r);
 } else console.log('github: skipped (need REPO.github.user and GITHUB_TOKEN)');
 
