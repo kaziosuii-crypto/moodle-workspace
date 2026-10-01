@@ -154,7 +154,13 @@ function walkerSource(structs) {
     // Only the node a variable actually points at is read. Following the links
     // would dereference whatever happens to be in them, and an uninitialised
     // "next" would crash a program that runs fine without instrumentation.
-    out += '  if(!__ws_p || __ws_d > 0 || __ws_steps > ' + STEP_CAP + ')return;\n';
+    out += '  int __ws_i;\n';
+    out += '  if(!__ws_p || __ws_d > 64 || __ws_steps > ' + STEP_CAP + ')return;\n';
+    // A node already visited on this walk means a cycle; a target that was never
+    // seen as a pointer value is not followed at all, so an uninitialised link
+    // can never be dereferenced.
+    out += '  for(__ws_i=0;__ws_i<__ws_seen_n;__ws_i++)if(__ws_seen[__ws_i]==(void*)__ws_p)return;\n';
+    out += '  if(__ws_seen_n<128)__ws_seen[__ws_seen_n++]=(void*)__ws_p;\n';
     out += '  printf("__WS_NODE__' + name + '|%p", (void*)__ws_p);\n';
     for (const f of def.fields) {
       if (f.kind === 'p') out += '  printf("|p:' + f.name + '=%p", (void*)__ws_p->' + f.name + ');\n';
@@ -162,7 +168,7 @@ function walkerSource(structs) {
       else out += '  printf("|' + f.kind + ':' + f.name + '=' + f.fmt + '", __ws_p->' + f.name + ');\n';
     }
     out += '  printf("\\n");\n';
-    for (const l of links) out += '  __ws_walk_' + name + '(__ws_p->' + l.name + ', __ws_d + 1);\n';
+    for (const l of links) out += '  if(__ws_known_has((void*)__ws_p->' + l.name + '))__ws_walk_' + name + '(__ws_p->' + l.name + ', __ws_d + 1);\n';
     out += '}\n';
   }
   return out;
@@ -235,10 +241,13 @@ export function instrument(source) {
           out.push(indent + 'printf("__WS_READ__%s|%d\\n","' + variable.name + '",(' + index + '));');
         }
       }
-      for (const variable of visible(scopes)) {
-        if (variable.kind === 'p' && walkable.has(variable.struct)) {
-          out.push(indent + '__ws_walk_' + variable.struct + '(' + variable.name + ',0);');
-        }
+      const pointers=visible(scopes).filter(v=>v.kind==='p'&&walkable.has(v.struct));
+      if(pointers.length)out.push(indent + '__ws_seen_n=0;');
+      for (const variable of pointers) {
+        // Every address a pointer has ever held is remembered, so a chain can be
+        // followed safely later: only known-good addresses are ever dereferenced.
+        out.push(indent + '__ws_known_add((void*)' + variable.name + ');');
+        out.push(indent + '__ws_walk_' + variable.struct + '(' + variable.name + ',0);');
       }
       if (currentFunction && currentFunction.ret && /^return\b/.test(body)) {
         const value = body.replace(/^return\b/, '').replace(/;\s*$/, '').trim();
@@ -296,7 +305,16 @@ export function instrument(source) {
   // The walker bodies dereference struct fields, so they go after the user's
   // struct definitions; the prototypes only need a forward declaration.
   const names = [...walkable];
-  const prologue = names.map(n => 'struct ' + n + ';').concat(names.map(n => 'static void __ws_walk_' + n + '(struct ' + n + '*, int);')).join('\n');
+  const helpers = [
+    'static void* __ws_known[1024];',
+    'static int __ws_known_n=0;',
+    'static void __ws_known_add(void* __ws_p){int __ws_i;if(!__ws_p)return;for(__ws_i=0;__ws_i<__ws_known_n;__ws_i++)if(__ws_known[__ws_i]==__ws_p)return;if(__ws_known_n<1024)__ws_known[__ws_known_n++]=__ws_p;}',
+    'static int __ws_known_has(void* __ws_p){int __ws_i;if(!__ws_p)return 0;for(__ws_i=0;__ws_i<__ws_known_n;__ws_i++)if(__ws_known[__ws_i]==__ws_p)return 1;return 0;}',
+    'static void* __ws_seen[128];',
+    'static int __ws_seen_n=0;'
+  ].join('\n');
+  const prologue = names.map(n => 'struct ' + n + ';').join('\n') + '\n' + helpers + '\n' +
+    names.map(n => 'static void __ws_walk_' + n + '(struct ' + n + '*, int);').join('\n');
   return { source: '#include <stdio.h>\nstatic int __ws_steps=0;\n' + prologue + '\n' + out.join('\n') + '\n' + walkerSource(structs), count };
 }
 
