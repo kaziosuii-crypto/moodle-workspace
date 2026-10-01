@@ -923,8 +923,16 @@ function openSandbox(){
 async function ensureSandbox(){
   if(cSandbox)return cSandbox;
   const sandbox=openSandbox();
-  try{await sandbox.call({type:'init',shim:WASI_SHIM,cached:[...tcURLs]},20000);}
-  catch(error){sandbox.close();throw new Error('无法启动执行沙箱：'+error.message);}
+  try{
+    const reply=await sandbox.call({type:'init',shim:WASI_SHIM,cached:[...tcURLs]},45000);
+    if(reply.type!=='ready')throw new Error(reply.message||('沙箱返回了 '+reply.type));
+  }
+  catch(error){
+    sandbox.close();
+    // Name the actual failure: a blocked worker, a blocked module import, or a
+    // slow network are three different problems with three different fixes.
+    throw new Error('无法启动执行沙箱（'+(error.timeout?'等待 45 秒仍未就绪':error.message)+'）');
+  }
   cSandbox=sandbox;
   return cSandbox;
 }
