@@ -151,7 +151,10 @@ function walkerSource(structs) {
     const links = def.fields.filter(f => f.kind === 'p' && f.target === name);
     if (!links.length) continue;
     out += 'static void __ws_walk_' + name + '(struct ' + name + '* __ws_p, int __ws_d){\n';
-    out += '  if(!__ws_p || __ws_d > 24 || __ws_steps > ' + STEP_CAP + ')return;\n';
+    // Only the node a variable actually points at is read. Following the links
+    // would dereference whatever happens to be in them, and an uninitialised
+    // "next" would crash a program that runs fine without instrumentation.
+    out += '  if(!__ws_p || __ws_d > 0 || __ws_steps > ' + STEP_CAP + ')return;\n';
     out += '  printf("__WS_NODE__' + name + '|%p", (void*)__ws_p);\n';
     for (const f of def.fields) {
       if (f.kind === 'p') out += '  printf("|p:' + f.name + '=%p", (void*)__ws_p->' + f.name + ');\n';
