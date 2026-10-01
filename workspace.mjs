@@ -41,7 +41,27 @@ const prefsKey = 'moodle-workspace:v4:settings';
 const read = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } };
 const storedPrefs=read(prefsKey,{});
 let prefs = {enabled:storedPrefs.aiV5Enabled??true,runner:storedPrefs.runner||''};
-function persist(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; } }
+function persist(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); return true; }
+  catch (error) {
+    // Quota is the usual failure once many drafts and AI analyses have piled up,
+    // and it also silently breaks the API key and the toolchain flag. Drop the
+    // largest reclaimable entries (saved AI analyses) and try once more.
+    const text=String(error&&error.name)+' '+String(error&&error.message);
+    if(!/quota|exceed|full/i.test(text))return false;
+    try {
+      const tutors=Object.keys(localStorage).filter(k=>k.includes(':tutor:'));
+      for(const stale of tutors.slice(0,60))localStorage.removeItem(stale);
+      localStorage.setItem(key,JSON.stringify(value));
+      return true;
+    } catch { return false; }
+  }
+}
+/** True when this browser refuses site data outright, rather than just being full. */
+function storageBlocked() {
+  try { localStorage.setItem('moodle-workspace:probe','1'); localStorage.removeItem('moodle-workspace:probe'); return false; }
+  catch { return true; }
+}
 const $ = s => root.querySelector(s);
 const $$ = s => [...root.querySelectorAll(s)];
 const activity = (file, id=current?.id) => new URL(`${file}?a=${encodeURIComponent(id)}`, base).href;
@@ -199,7 +219,7 @@ function saveDraft() {
   const original=document.querySelector('textarea[name=code]#edit-code');
   if(original?.form?.querySelector('[name=a]')?.value===current.id)original.value=current.draft.code;
   const ok=persist(draftKey(current.id),current.draft);
-  $('[data-save]').textContent=ok?'已存储':'浏览器存储不可用';
+  $('[data-save]').textContent=ok?'已存储':(storageBlocked()?'浏览器禁止了站点数据（草稿与密钥无法保存）':'浏览器存储已写满（草稿未保存）');
 }
 function setBusy(value) {
   busy=value;
