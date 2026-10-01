@@ -555,6 +555,21 @@ export function changedValues(previous, current) {
   return out;
 }
 
+/**
+ * The raw steps a jump passes over.
+ *
+ * "skip" mode collapses every repeat of a line, so a single click can hide dozens of raw
+ * steps - the loop iterations that failed a condition, the calls that did nothing. Handing
+ * them to the player is what lets it show what went past instead of silently teleporting.
+ */
+export function skippedSteps(steps, from, to) {
+  const lo = Math.min(from, to), hi = Math.max(from, to);
+  if (hi - lo < 2 || !steps.length) return [];
+  const out = [];
+  for (let raw = lo + 1; raw < hi; raw++) out.push({ raw, step: steps[raw] });
+  return out;
+}
+
 /** One plain sentence describing where the run is. */
 export function describeStep(steps, index) {
   if (!steps.length) return '没有记录到任何执行步骤。';

@@ -14,7 +14,7 @@ import dagre from 'dagre';
 import cytoscape from 'cytoscape';
 import klayLayout from 'cytoscape-klay';
 cytoscape.use(klayLayout);
-import { instrument, parseTrace, describeStep, viewIndices, changedNames, changedValues } from './trace.mjs';
+import { instrument, parseTrace, describeStep, viewIndices, changedNames, changedValues, skippedSteps } from './trace.mjs';
 import { animate, stagger } from 'animejs';
 import { AI_CONFIG } from './ai-config.mjs';
 import { llm } from './ai.mjs';
@@ -472,6 +472,21 @@ function createEditor() {
   if(window.ResizeObserver)new ResizeObserver(()=>renderInlineDiagnosis()).observe(editor.dom);
   window.addEventListener('resize',()=>{renderInlineDiagnosis();editor?.requestMeasure();});
 }
+// 最近一次从提交历史里读到的源码，供「放进代码栏」使用。
+let historyCode='';
+/**
+ * Put a past submission into the editor.
+ *
+ * It goes in through a normal transaction, so Ctrl+Z still brings the old code back and
+ * the draft follows the editor as usual - nothing is destroyed irreversibly.
+ */
+function applyHistoryCode(source){
+  if(!editor)return;
+  editor.dispatch({changes:{from:0,to:editor.state.doc.length,insert:source},selection:{anchor:0},scrollIntoView:true});
+  saveDraft();
+  editor.focus();
+  toast('已放进代码栏，Ctrl+Z 可以撤销');
+}
 function renderDescription() {
   const p=current.problem;
   replaceContent($('[data-left-body]'),`<article class="description">
@@ -550,7 +565,7 @@ async function switchLeft(tab) {
   const doc=await requestDoc(activity('history.php'));
   if (current.id!==id || activeLeft!=='history') return;
   const entries=[...doc.querySelectorAll('#submitlist a[submitid]')];
-  replaceContent($('[data-left-body]'),`<div class="history"><h3>提交记录</h3>${entries.map(a=>`<button class="history-item" data-history="${esc(safeURL(a.getAttribute('href'),base))}"><span>${esc(text(a).replace(/-\s+(\d)/g,'-$1'))}</span><small>#${esc(a.getAttribute('submitid'))}</small></button>`).join('')||'<div class="empty">还没有提交记录</div>'}<div data-history-code></div></div>`);
+  replaceContent($('[data-left-body]'),`<div class="history"><h3>提交记录</h3>${entries.map(a=>{const url=esc(safeURL(a.getAttribute('href'),base));return `<div class="history-row"><button class="history-item" data-history="${url}"><span>${esc(text(a).replace(/-\s+(\d)/g,'-$1'))}</span><small>#${esc(a.getAttribute('submitid'))}</small></button><button class="history-paste" data-paste-history="${esc(url)}" title="把这次提交的代码放进代码栏">${icon('code')}粘贴到代码栏</button></div>`;}).join('')||'<div class="empty">还没有提交记录</div>'}<div data-history-code></div></div>`);
 }
 async function loadExercise(viewURL, push=true) {
   if (busy) return;
@@ -1056,10 +1071,21 @@ function traceSpot(){
   const raw=view[at],previous=trace.steps[view[at-1]];
   return{step:trace.steps[raw],raw,index:at,total:view.length,previous};
 }
+/**
+ * Move the play head and remember what the move passed over.
+ *
+ * In 跳行模式 one click can cross dozens of raw steps. Recording them here is what lets
+ * the player replay the values that went past instead of silently teleporting.
+ */
+function traceSeekTo(trace,view,next){
+  const at=Math.min(Math.max(trace.cursor||0,0),view.length-1);
+  trace.cursor=Math.max(0,Math.min(next,view.length-1));
+  trace.skip=skippedSteps(trace.steps,view[at],view[trace.cursor]);
+}
 function traceGoto(index){
   const trace=current?.trace,view=traceView();
   if(!trace||!view.length)return;
-  trace.cursor=Math.max(0,Math.min(index,view.length-1));
+  traceSeekTo(trace,view,index);
   traceHighlight(trace.steps[view[trace.cursor]].line);
   renderTrace();
 }
@@ -1077,7 +1103,7 @@ function tracePlay(){
     if(!state?.playing)return traceStop();
     const list=traceView();
     if((state.cursor||0)>=list.length-1)return traceStop();
-    state.cursor++;
+    traceSeekTo(state,list,(state.cursor||0)+1);
     traceHighlight(state.steps[list[state.cursor]].line);
     renderTrace();
   },period);
@@ -1702,7 +1728,7 @@ function renderTraceScreen(){
         '<button data-action="trace-next" class="ts-btn">下一步</button>'+
         '<button data-action="trace-close" class="ts-btn">退出全屏</button>'+
       '</header>'+
-      '<div class="ts-stack">'+stackHTML(spot.step.stack,spot.step.returns)+'</div>'+
+      '<div class="ts-stack">'+stackHTML(spot.step.stack,spot.step.returns)+'</div>'+skipHTML(trace)+
       // Plain values are drawn on the canvas too, so a step with no heap yet is still
       // worth opening - otherwise the feature looks broken on a simple program.
       (spot.step.nodes.length||(spot.step.vars||[]).length?'<div class="ts-preview">'+
@@ -1763,9 +1789,63 @@ function renderTraceScreen(){
     path.style.strokeDasharray=len; path.style.strokeDashoffset=len;
     motion(path,{strokeDashoffset:[len,0],duration:460,delay:280,ease:'outCubic'});
   });
+  playSkipBurst(host,trace);
   bindGraphNav(host);
   const seek=host.querySelector('[data-trace-seek]');
   if(seek)seek.oninput=event=>{clearInterval(traceTimer);traceTimer=null;current.trace.playing=false;traceGoto(Number(event.target.value)-1);};
+}
+/* ------------------------------------------------------------- 跳过的那些步 --
+ * 跳行模式一次可能跨过几十个原始步骤。与其直接瞬移，不如把这段里发生的值变化快速播
+ * 一遍：一个值一帧地掠过并上浮淡出，读起来就是「这里循环又空转了 20 圈」。
+ */
+// 同时活着的牌不超过三张，多了就糊成一团；总量由徽标交代。
+const SKIP_CHIPS=14;
+/** What the skipped steps actually did, one entry per thing worth seeing. */
+function skipBurst(steps,skipped){
+  const items=[];
+  let printed='';
+  for(const {raw,step} of skipped){
+    const before=steps[raw-1];
+    for(const change of changedValues(before,step))items.push({kind:'var',name:change.name,value:change.to});
+    const from=before?.stack?.length??0,to=step.stack?.length??0;
+    if(to>from)items.push({kind:'call',name:(step.stack[to-1]||'?')+'()',value:''});
+    else if(to<from)items.push({kind:'ret',name:(before?.stack?.[from-1]||'?')+' 返回',value:''});
+    if((step.output||'').length>(before?.output||'').length)printed=(step.output||'').slice(-48);
+  }
+  if(printed)items.push({kind:'out',name:'输出',value:printed.replace(/\n/g,'⏎')});
+  return items;
+}
+/** "跳过 23 步" plus the line that repeated, which is the loop that ran. */
+function skipBadge(skipped){
+  const per=new Map();
+  for(const {step} of skipped)per.set(step.line,(per.get(step.line)||0)+1);
+  let line=0,count=0;
+  for(const [l,c] of per)if(c>count){line=l;count=c;}
+  return count>2?'跳过 '+skipped.length+' 步 · 第 '+line+' 行重复 '+count+' 次':'跳过 '+skipped.length+' 步';
+}
+function skipHTML(trace){
+  const skipped=trace.skip;
+  if(!skipped||!skipped.length)return '';
+  const items=skipBurst(trace.steps,skipped);
+  const badge='<span class="ts-skip-badge">'+esc(skipBadge(skipped))+'</span>';
+  if(!items.length)return '<div class="ts-skip">'+badge+'</div>';
+  const shown=items.slice(0,SKIP_CHIPS);
+  return '<div class="ts-skip">'+badge+'<div class="ts-skip-slot">'+
+    shown.map((it,i)=>'<span class="ts-skip-chip '+it.kind+'">'+esc(it.name)+(it.value!==''?'<b>'+esc(it.value)+'</b>':'')+'</span>').join('')+
+    (items.length>shown.length?'<span class="ts-skip-chip more">+'+(items.length-shown.length)+'</span>':'')+
+  '</div></div>';
+}
+/** One value per frame, rising and fading: fast enough to blur, slow enough to read. */
+function playSkipBurst(host,trace){
+  const layer=host.querySelector('.ts-skip');
+  if(!layer||!trace.skip?.length)return;
+  if(reducedMotion.matches){layer.classList.add('static');return;}
+  const chips=layer.querySelectorAll('.ts-skip-chip');
+  // 每张牌活得短、间隔小：读起来是一串掠过的值，而不是一叠盖在一起的标签。
+  const gap=Math.max(38,Math.min(90,640/Math.max(1,chips.length)));
+  motion(chips,{translateY:[14,-34],opacity:[0,1,0],duration:Math.round(gap*2.6),delay:stagger(gap),ease:'outCubic'});
+  const badge=layer.querySelector('.ts-skip-badge');
+  if(badge)motion(badge,{opacity:[0,1],translateY:[-5,0],duration:240,ease:'outCubic'});
 }
 function renderTrace(){
   const trace=current?.trace;
@@ -1789,7 +1869,7 @@ function renderTrace(){
       button('trace-stop','停止','close')+
       button('trace-mode',trace.mode==='skip'?'跳行模式':'全部步骤','list')+
       button('trace-screen','全屏','expand')+
-      '<span class="trace-count">'+esc(traceLabel())+'</span>'+
+      '<span class="trace-count">'+esc(traceLabel())+(trace.skip&&trace.skip.length?' · '+esc(skipBadge(trace.skip)):'')+'</span>'+
     '</div>'+
     '<div class="trace-progress"><span style="width:'+pct+'%"></span></div>'+
     '<div class="trace-vars">'+(step.vars&&step.vars.length
@@ -2197,7 +2277,26 @@ async function handleClick(event) {
   if(el.dataset.problem!==undefined){const p=problems[Number(el.dataset.problem)];closeModal();return loadExercise(p.url);}
   if(el.dataset.history){
     const id=current.id;const doc=await requestDoc(el.dataset.history);
-    if(current.id===id && $('[data-history-code]'))$('[data-history-code]').innerHTML=`<h3 style="margin-top:18px">历史代码（只读）</h3><pre class="history-code">${esc(doc.querySelector('#codeview textarea')?.value || '无代码内容')}</pre>`;
+    if(current.id!==id)return;
+    const source=doc.querySelector('#codeview textarea')?.value||'';
+    historyCode=source;
+    const host=$('[data-history-code]');
+    if(host)host.innerHTML='<h3 style="margin-top:18px">历史代码（只读）</h3>'+
+      '<pre class="history-code">'+esc(source||'无代码内容')+'</pre>'+
+      (source.trim()?button('paste-history','把这份代码放进代码栏','code','history-paste wide'):'');
+    return;
+  }
+  if(el.dataset.pasteHistory!==undefined){
+    const id=current.id;el.disabled=true;
+    try{
+      // 列表项自带这次提交的地址；只读视图下面那个按钮用刚读到的那一份。
+      const url=el.dataset.pasteHistory;
+      const code=url?(await requestDoc(url)).querySelector('#codeview textarea')?.value||'':historyCode;
+      if(current.id!==id)return;
+      if(!String(code).trim())return toast('这次提交没有可读取的代码。');
+      applyHistoryCode(String(code));
+    }catch(error){toast(error.message);}
+    finally{el.disabled=false;}
     return;
   }
   const action=el.dataset.action;

@@ -20,6 +20,13 @@ a{color:#1683d8;text-decoration:none}a:hover{text-decoration:underline}h1,h2,h3,
 .eol-mirror{position:absolute;inset:0;padding:10px 12px;font:12px/1.65 Consolas,monospace;color:transparent;white-space:pre-wrap;overflow-wrap:anywhere;pointer-events:none;overflow:hidden;border:1px solid transparent;border-radius:7px}
 .eol-mirror .io-eol{color:#adadad}.field{display:grid;gap:6px;font-size:12px;color:#909090}.field textarea{width:100%;min-height:57px;resize:vertical;border:1px solid transparent;border-radius:7px;background:#f5f5f5;padding:10px 12px;font:12px/1.65 Consolas,monospace;color:#333}.case-tools{display:flex;gap:8px;color:#8c8c8c;font-size:11px;flex-wrap:wrap}.case-tools button{font-size:11px;padding:4px 7px}.notice{font-size:11px;color:#999;padding:0 18px 12px}
 .empty{padding:38px 20px;text-align:center;color:#aaa;font-size:12px}.empty svg{width:25px;height:25px;margin:0 auto 10px;display:block;color:#bbb}.results{padding:16px 18px}.result-title{font-size:18px;font-weight:600;display:flex;align-items:center;gap:12px;margin-bottom:14px}.result-title small{font-size:11px;font-weight:400;color:#999}.table-wrap{overflow:auto;max-width:100%}table.results-table{border-collapse:collapse;width:100%;font-size:11px}table.results-table th{font-weight:500;color:#999;text-align:left;white-space:nowrap;background:#fafafa}table.results-table td,table.results-table th{padding:8px;border-bottom:1px solid #eee}table.results-table tbody tr{cursor:pointer}table.results-table tbody tr:hover,table.results-table tr.selected{background:#f7f9fb}.result-detail{margin-top:17px;display:grid;gap:12px}.result-detail pre{margin:5px 0 0;padding:10px;background:#f6f6f6;border-radius:6px;white-space:pre-wrap;overflow-wrap:anywhere;color:#333;font:12px/1.6 Consolas,monospace}.result-detail label{font-size:11px;color:#999}.result-detail a{float:right;font-size:11px}.facts{display:flex;gap:12px;color:#999;font-size:11px;flex-wrap:wrap}.result-warning{color:#9c7625;background:#fff8e6;padding:9px;font-size:11px;border-radius:6px}
+.history-row{display:flex;gap:6px;align-items:stretch;margin-bottom:2px}
+.history-row .history-item{flex:1;min-width:0}
+.history-paste{flex:none;display:inline-flex;align-items:center;gap:5px;font-size:11.5px;padding:0 10px;
+  background:#eef6ff;color:#1686ef;border-radius:8px;font-weight:600;white-space:nowrap}
+.history-paste:hover{background:#e2efff}
+.history-paste svg{width:13px;height:13px}
+.history-paste.wide{margin-top:8px;padding:7px 14px;font-size:12.5px}
 .history{padding:16px}.history-item{display:flex;align-items:center;justify-content:space-between;padding:12px 7px;border-bottom:1px solid #eee;width:100%;font-size:12px}.history-item small{color:#aaa}.history-code{font:12px/1.65 Consolas,monospace;white-space:pre-wrap;background:#f6f6f6;padding:14px;border-radius:6px;overflow-wrap:anywhere}
 .overlay{position:absolute;inset:0;background:#0003;z-index:30;display:flex;align-items:center;justify-content:center;padding:20px;animation:fade .15s}.dialog{background:#fff;box-shadow:0 14px 60px #0002;border-radius:12px;max-height:calc(100dvh - 40px);width:min(480px,100%);overflow:auto;padding:22px}.dialog header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}.dialog header h2{font-size:16px}.dialog .field{margin-bottom:14px}.dialog input:not([type=checkbox]),.dialog select{width:100%;height:35px;border:1px solid #e3e3e3;border-radius:5px;padding:7px 9px;background:#fff;color:#333;font-size:12px}.dialog .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}.dialog .check{display:flex;align-items:center;gap:7px;color:#666;font-size:12px;margin:12px 0}.dialog .hint{font-size:11px;color:#999;margin:8px 0 14px}.dialog footer{display:flex;gap:7px;justify-content:flex-end;margin-top:18px}.dialog .primary{background:#16a34a;color:#fff}.dialog pre{font:12px/1.7 Consolas,monospace;white-space:pre-wrap;max-height:40vh;overflow:auto}
 .overlay.drawer-overlay{justify-content:flex-start;padding:0}.drawer{height:100%;width:min(390px,90vw);background:white;box-shadow:8px 0 35px #0001;display:flex;flex-direction:column;padding:20px 16px;animation:slide .17s}.drawer header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}.drawer input{width:100%;height:35px;border:1px solid #e5e5e5;border-radius:6px;padding:8px 12px;background:#f7f7f7;font-size:12px}.problem-list{overflow:auto;margin-top:12px;flex:1}.problem-item{display:flex;justify-content:space-between;width:100%;text-align:left;padding:10px 12px;border-bottom:1px solid #f5f5f5;border-radius:5px;font-size:12px}.problem-item span:first-child{overflow:hidden;text-overflow:ellipsis}.problem-item.active{background:#edf6ff;color:#1686ef}.problem-item small{color:#aaa}.drawer .hint{font-size:11px;color:#999;margin-top:10px}
@@ -180,6 +187,26 @@ input,textarea,select{transition:border-color var(--t-fast) var(--ease),box-shad
 
 
 .ts-stack{display:flex;align-items:center;gap:8px;padding:10px 40px;border-bottom:1px solid #f2f2f2;flex:none;flex-wrap:wrap;min-height:44px}
+/* 跳行时被跨过的值：一个槽位一张牌，逐张上浮淡出，不占布局。 */
+.ts-screen{position:relative}
+.tscreen{position:relative}
+/* 放在代码区下方的空白带里：那里平时什么都没有，不会压住预览条或代码。 */
+.ts-skip{position:absolute;left:0;right:0;bottom:64px;height:0;pointer-events:none;z-index:6}
+.ts-skip-slot{position:relative;height:0;display:flex;justify-content:center}
+.ts-skip-chip{position:absolute;top:0;opacity:0;white-space:nowrap;padding:3px 10px;border-radius:8px;
+  background:#eef6ff;border:1px solid #cfe4ff;color:#1686ef;font:600 11.5px/1.5 var(--font-mono)}
+.ts-skip-chip b{color:#0f6fd0;margin-left:6px}
+.ts-skip-chip.call{background:#f4f1ff;border-color:#ded4ff;color:#7a5af8}
+.ts-skip-chip.call b{color:#6a45f0}
+.ts-skip-chip.ret{background:#f5f6f8;border-color:#e6e6e8;color:#6b7280}
+.ts-skip-chip.out{background:#eefaf1;border-color:#cdeed9;color:#1f9d55}
+.ts-skip-chip.out b{color:#17794a}
+.ts-skip-chip.more{background:#fff4e0;border-color:#f0d29b;color:#9c7625}
+.ts-skip-badge{position:absolute;top:-58px;left:50%;transform:translateX(-50%);opacity:0;white-space:nowrap;
+  font-size:11px;color:#9aa0a6;background:#fff;padding:1px 8px;border-radius:6px;border:1px solid #f0f0f0}
+.ts-skip.static .ts-skip-badge{opacity:1}
+.ts-skip.static .ts-skip-chip{opacity:0}
+@media(prefers-reduced-motion:reduce){.ts-skip-chip{display:none}}
 .ts-stack-label{font-size:11px;color:#b0b0b0}
 .ts-frame{background:#f5f6f8;border:1px solid #e8e8ea;border-radius:6px;padding:3px 10px;font-family:var(--font-mono);font-size:12px;color:#555}
 .ts-frame.active{background:#e9f4ff;border-color:#b9dcff;color:#1686ef;font-weight:600}

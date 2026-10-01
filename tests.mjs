@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
 import { readFileSync } from 'node:fs';
 import { cleanSuggestion, copilotPrompt, copilotWorthAsking } from './copilot.mjs';
+import { skippedSteps } from './trace.mjs';
 import { ioText, richContent, formatTime, parseProblem, parseNavigation, parseResult, safeURL } from './adapter.mjs';
 import { parseTutorResponse, tutorNarrative, tutorPrompt } from './tutor.mjs';
 const base='http://example.test/moodle/mod/programming/view.php?a=117';
@@ -79,6 +80,16 @@ test('tutor prompt keeps test inputs expected outputs and submission evidence',(
 });
 
 const FENCE=String.fromCharCode(96).repeat(3);
+test('跳行模式下被跨过的原始步会被完整记下来',()=>{
+  const steps=[{line:1},{line:2},{line:2},{line:2},{line:3}];
+  assert.deepEqual(skippedSteps(steps,0,4).map(s=>s.raw),[1,2,3]);
+  assert.equal(skippedSteps(steps,0,4).length,3);
+  // 往回退也要能说出跨过了什么，动画方向不同但内容一样。
+  assert.deepEqual(skippedSteps(steps,4,0).map(s=>s.raw),[1,2,3]);
+  assert.deepEqual(skippedSteps(steps,0,1),[]);   // 相邻两步没有跳过任何东西
+  assert.deepEqual(skippedSteps(steps,2,2),[]);
+  assert.deepEqual(skippedSteps([],0,3),[]);
+});
 test('内联补全会剥掉代码围栏，并去掉模型重复的那一行',()=>{
   assert.equal(
     cleanSuggestion(FENCE+'c\nfor (int i=0;i<n;i++) {\n    sum += i;\n}\n'+FENCE,'    for (int i=0;i<n;i++) {','\n    return 0;\n}'),
