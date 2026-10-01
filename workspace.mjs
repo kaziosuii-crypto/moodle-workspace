@@ -1125,13 +1125,44 @@ const CY_STYLE=[
   {selector:'edge[kind="read"]',style:{'line-color':'#e0a94a','target-arrow-color':'#e0a94a','width':2}},
   {selector:'.fresh',style:{'opacity':.05}}
 ];
+// Cell metrics for the hand-placed chain layout. They mirror the node sizes in
+// CY_STYLE above, which is why they live next to it.
+const CY_W=142,CY_H=62,CY_GX=56,CY_GY=80,CY_CHIP=112;
+/** `%p` prints a null pointer as `0x0` or `(nil)` depending on the libc. */
+const nullPtr=value=>!value||/^(?:\(nil\)|nil|0|0x0+)$/i.test(String(value));
+/**
+ * True when the structure is one closed loop and nothing else.
+ *
+ * A circular list gives every node exactly one outgoing link, so it passes the chain
+ * test while actually being a cycle. As a serpentine its closing arrow has to sweep
+ * back across the whole canvas, and KLay ranks it into a straight line with the same
+ * long edge - so a plain ring is the one shape that actually reads as a loop. Every
+ * node has to be on the loop: a structure that also branches keeps KLay, which is
+ * what draws branching well.
+ */
+function cyRing(structs){
+  const n=structs.length;
+  if(n<2)return false;
+  const link=new Map();
+  for(const node of structs){
+    const ps=node.fields.filter(f=>f.kind==='p');
+    if(ps.length!==1)return false;
+    link.set(node.addr,ps[0].value);
+  }
+  let cur=structs[0].addr;
+  for(let i=0;i<n;i++){
+    if(!link.has(cur))return false;
+    cur=link.get(cur);
+  }
+  return cur===structs[0].addr;
+}
 function cyElements(spot){
   const live=new Set(spot.step.nodes.map(n=>n.addr));
   const nodes=[],edges=[];
   for(const n of spot.step.nodes){
     const lines=[n.type+'  '+String(n.addr).slice(-5)];
     for(const f of n.fields){
-      if(f.kind==='p'){ lines.push(f.name+' -> '+(live.has(f.value)?String(f.value).slice(-5):(f.value==='0x0'?'NULL':'?'))); }
+      if(f.kind==='p'){ lines.push(f.name+' -> '+(live.has(f.value)?String(f.value).slice(-5):(nullPtr(f.value)?'NULL':'?'))); }
       else lines.push(f.name+' = '+f.value);
     }
     nodes.push({data:{id:'n:'+n.addr,kind:'node',label:lines.join('\n')}});
@@ -1153,34 +1184,123 @@ function cyElements(spot){
   }
   return [...nodes,...edges];
 }
+/**
+ * Places a wrapped chain as a serpentine grid and pins every pointer to its target.
+ *
+ * Cytoscape's grid layout fills left-to-right and never doubles back, so a chain
+ * longer than one row drew a full-width diagonal from the end of each row back to
+ * the start of the next. Placing the nodes by hand lets each row run the opposite
+ * way to the one above it, so the chain hands over straight down instead.
+ *
+ * Pointer variables are stacked just above the node they name. Parked after the
+ * list they aimed quarter-screen-long arrows at the far corner, which was most of
+ * what made a long list unreadable. Anything not attached to the structure - plain
+ * values, and pointers holding NULL or a foreign address - lines up in one rail
+ * under the structure.
+ *
+ * A closed loop gets laid out as a ring instead, with its pointers just outside it.
+ */
+function cyArrange(els,spot,cols,shape){
+  if(!shape)return {elements:els,positions:null};
+  const nodes=els.filter(e=>!e.data.source),edges=els.filter(e=>e.data.source);
+  const target=new Map();
+  for(const e of edges)if(e.data.kind==='ptr')target.set(e.data.source,e.data.target);
+  const positions=new Map(),at=new Map(),angle=new Map(),lane=new Map(),rail=[];
+  const structs=spot.step.nodes;
+  let railY;
+  if(shape==='ring'){
+    const n=structs.length,step=2*Math.PI/n;
+    // The tightest pair sits at the top of the ring, where only the vertical radius
+    // separates the two boxes, so that gap is what sets the size.
+    const ry=Math.max(210,205/(2*Math.sin(Math.PI/n))),rx=ry*1.55;
+    for(let i=0;i<n;i++){
+      const a=i*step,p={x:rx*Math.sin(a),y:-ry*Math.cos(a)};
+      at.set('n:'+structs[i].addr,p);angle.set('n:'+structs[i].addr,a);
+      positions.set('n:'+structs[i].addr,p);
+    }
+    for(const e of nodes){
+      const id=e.data.id;
+      if(id.slice(0,2)==='n:')continue;
+      const t=target.get(id);
+      if(t&&angle.has(t)){if(!lane.has(t))lane.set(t,[]);lane.get(t).push(id);}
+      else rail.push(id);
+    }
+    for(const [t,ids] of lane){
+      const a0=angle.get(t),ring={x:rx*1.33,y:ry*1.33};
+      ids.forEach((id,k)=>{
+        // Just outside its own node, so several pointers to one box fan apart instead
+        // of stacking on top of each other.
+        const a=a0+(k-(ids.length-1)/2)*.24;
+        positions.set(id,{x:ring.x*Math.sin(a),y:-ring.y*Math.cos(a)});
+      });
+    }
+    railY=ry+120;
+  }else{
+    for(let i=0;i<structs.length;i++){
+      const r=Math.floor(i/cols),c=i%cols;
+      const vc=(r%2)?(cols-1-c):c;
+      const p={x:vc*(CY_W+CY_GX),y:r*(CY_H+CY_GY)};
+      at.set('n:'+structs[i].addr,p);
+      positions.set('n:'+structs[i].addr,p);
+    }
+    const rows=Math.max(1,Math.ceil(structs.length/cols));
+    railY=(rows-1)*(CY_H+CY_GY)+CY_H/2+92;
+    for(const e of nodes){
+      const id=e.data.id;
+      if(id.slice(0,2)==='n:')continue;
+      const t=target.get(id);
+      if(t&&at.has(t)){
+        if(!lane.has(t))lane.set(t,[]);
+        lane.get(t).push(id);
+      }else{
+        rail.push(id);
+      }
+    }
+    // Chips share one lane above the row and spread sideways when several name the same
+    // node, so no chip ever covers the box it points at and its arrow stays visible.
+    for(const [t,ids] of lane){
+      const p=at.get(t);
+      ids.forEach((id,k)=>positions.set(id,{x:p.x+(k-(ids.length-1)/2)*(CY_CHIP+10),y:p.y-CY_H/2-48}));
+    }
+  }
+  rail.forEach((id,k)=>positions.set(id,{x:k*(CY_CHIP+18),y:railY}));
+  return {elements:els,positions};
+}
 function renderCy(host,spot){
   const box=host.querySelector('.cy-host');
   if(!box)return;
   if(cyView&&cyHost!==box){try{cyView.destroy();}catch{}cyView=null;}
   if(!cyView){
     cyView=cytoscape({container:box,elements:[],style:CY_STYLE,boxSelectionEnabled:false,
-      wheelSensitivity:.3,layout:{name:'klay',klay:{direction:'RIGHT',spacing:34},animate:false}});
+      wheelSensitivity:.3,
+      // fit() would otherwise blow two lone variables up to fill the whole canvas.
+      minZoom:.25,maxZoom:1.25,
+      layout:{name:'klay',klay:{direction:'RIGHT',spacing:34},animate:false}});
     cyHost=box;
   }
   const before=new Set(cyView.elements().map(e=>e.id()));
-  cyView.json({elements:cyElements(spot)});
   // KLay ranks a chain one node per column, which for 41 nodes is thousands of
-  // pixels wide and forces fit() to shrink the text into nothing. A chain is laid
-  // out as a wrapped grid shaped like the viewport instead; KLay keeps the job
-  // for structures that actually branch.
+  // pixels wide and forces fit() to shrink the text into nothing. A chain is placed
+  // by hand as a serpentine shaped like the viewport instead; KLay keeps the job for
+  // structures that actually branch or loop.
   const count=spot.step.nodes.length;
-  const chain=spot.step.nodes.every(nd=>nd.fields.filter(f=>f.kind==='p').length<=1);
+  const ring=cyRing(spot.step.nodes);
+  const chain=!ring&&spot.step.nodes.every(nd=>nd.fields.filter(f=>f.kind==='p').length<=1);
   const rect=box.getBoundingClientRect();
   const aspect=(rect.width||1200)/Math.max(240,rect.height||700);
-  const cols=Math.max(2,Math.min(12,Math.round(Math.sqrt(Math.max(1,count)*aspect))));
-  let placed=false;
-  if(!chain){
+  const cols=Math.max(2,Math.min(14,Math.round(Math.sqrt(Math.max(1,count)*aspect*(CY_H+CY_GY)/(CY_W+CY_GX)))));
+  const laid=cyArrange(cyElements(spot),spot,cols,ring?'ring':(chain?'grid':null));
+  cyView.json({elements:laid.elements});
+  if(laid.positions){
+    cyView.nodes().forEach(n=>{const p=laid.positions.get(n.id());if(p)n.position(p);});
+    cyView.layout({name:'preset',fit:false,animate:false}).run();
+  }else{
     try{
       cyView.layout({name:'klay',klay:{direction:'RIGHT',spacing:34,edgeRouting:'ORTHOGONAL'},animate:false}).run();
-      placed=true;
-    }catch{}
+    }catch{
+      cyView.layout({name:'grid',cols,avoidOverlap:true,padding:26,animate:false}).run();
+    }
   }
-  if(!placed)cyView.layout({name:'grid',cols,avoidOverlap:true,padding:26,animate:false}).run();
   cyView.fit(undefined,44);
   cyView.elements().filter(e=>!before.has(e.id())).forEach(e=>{
     e.addClass('fresh');
@@ -1197,7 +1317,8 @@ function graphScreenHTML(){
     '<button data-action="trace-prev" class="ts-btn">上一步</button>'+
     '<button data-action="trace-next" class="ts-btn">下一步</button>'+
     '<button data-action="graph-close" class="ts-btn">退出</button></header>'+
-    '<div class="cy-host"></div>';
+    '<div class="cy-host"></div>'+
+    '<p class="cy-empty'+(spot.step.nodes.length||(spot.step.vars||[]).length?' hidden':'')+'">这一步还没有可以画进内存图的数据。</p>';
 }
 function renderGraphScreen(){
   const host=$('[data-graph-screen]');
@@ -1208,7 +1329,7 @@ function renderGraphScreen(){
 }
 function openGraphScreen(){
   const trace=current?.trace,spot=traceStop?traceSpot():null;
-  if(!trace||!spot){toast('还没有可查看的节点。');return;}
+  if(!trace||!spot||(!spot.step.nodes.length&&!(spot.step.vars||[]).length)){toast('这一步还没有可以查看的数据。');return;}
   trace.canvas=true;
   let host=$('[data-graph-screen]');
   if(!host){host=document.createElement('div');host.className='graph-screen';host.setAttribute('data-graph-screen','');root.append(host);}
@@ -1402,9 +1523,14 @@ function renderTraceScreen(){
         '<button data-action="trace-close" class="ts-btn">退出全屏</button>'+
       '</header>'+
       '<div class="ts-stack">'+stackHTML(spot.step.stack,spot.step.returns)+'</div>'+
-      (spot.step.nodes.length?'<div class="ts-preview">'+'<div class="ts-graphwrap preview">'+graphHTML(spot.step.nodes,graphKeys(spot.previous&&spot.previous.nodes),graphOptions(spot,true))+
-        '</div><div class="ts-preview-bar">'+'<span class="ts-preview-note">预览，只显示前 '+Math.min(8,spot.step.nodes.length)+' 个节点</span>'+
-        '<button class="ts-canvas-open" data-action="graph-full">打开数据画板 · 共 '+spot.step.nodes.length+' 个节点</button></div></div>':'')+
+      // Plain values are drawn on the canvas too, so a step with no heap yet is still
+      // worth opening - otherwise the feature looks broken on a simple program.
+      (spot.step.nodes.length||(spot.step.vars||[]).length?'<div class="ts-preview">'+
+        (spot.step.nodes.length?'<div class="ts-graphwrap preview">'+graphHTML(spot.step.nodes,graphKeys(spot.previous&&spot.previous.nodes),graphOptions(spot,true))+'</div>':'')+
+        '<div class="ts-preview-bar">'+(spot.step.nodes.length
+          ?'<span class="ts-preview-note">预览，只显示前 '+Math.min(8,spot.step.nodes.length)+' 个节点</span>'
+          :'<span class="ts-preview-note">这一步只有普通变量</span>')+
+        '<button class="ts-canvas-open" data-action="graph-full">打开数据画板 · 共 '+(spot.step.nodes.length?spot.step.nodes.length+' 个节点':(spot.step.vars||[]).length+' 个变量')+'</button></div></div>':'')+
       '<div class="ts-body">'+
         '<div class="ts-code">'+traceCodeHTML(spot.step.line,4)+'</div>'+
         '<div class="ts-side">'+

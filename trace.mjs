@@ -47,6 +47,22 @@ function splitTop(text, separator) {
 
 const SPECIFIER = /^(?:(?:static|const|volatile|register|auto|unsigned|signed|long|short|int|char|float|double|size_t)\s+)+/;
 
+/** Index just past the ")" that closes the "(" at `from`, or -1 when unbalanced. */
+function matchParen(text, from) {
+  let depth = 0;
+  for (let i = from; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"' || c === "'") {
+      const quote = c;
+      for (i++; i < text.length && text[i] !== quote; i++) if (text[i] === '\\') i++;
+      continue;
+    }
+    if (c === '(') depth++;
+    else if (c === ')' && --depth === 0) return i + 1;
+  }
+  return -1;
+}
+
 /** Names and kinds declared by one line, or [] when it declares nothing usable. */
 export function declarationsIn(line) {
   const body = line.trim();
@@ -113,14 +129,33 @@ function marker(line, scope) {
  * where each link goes; the UI turns those addresses into arrows.
  */
 const STRUCT_OPEN = /^\s*struct\s+([A-Za-z_]\w*)\s*\{/;
-const STRUCT_PTR_VAR = /^\s*struct\s+([A-Za-z_]\w*)\s*\*\s*([A-Za-z_]\w*)\s*(?:=|;|,|\))/;
+const STRUCT_DECL = /^\s*struct\s+([A-Za-z_]\w*)\s*\*/;
+/**
+ * Every pointer a "struct X *a, *b = ...;" statement declares.
+ *
+ * Reading only the first name meant "struct node *head = NULL, *p;" recorded the
+ * head of the list but never the cursor that walks it - which for a linked list is
+ * usually the variable the whole trace is about.
+ */
+function structPtrVars(body) {
+  const head = body.match(STRUCT_DECL);
+  if (!head) return [];
+  const out = [];
+  splitTop(body.slice(head[0].length), ',').forEach((part, i) => {
+    // The leading '*' was consumed by the match, so only later declarators carry one.
+    const name = i ? part.match(/^\s*\*+\s*([A-Za-z_]\w*)/) : part.match(/^\s*([A-Za-z_]\w*)/);
+    if (name) out.push({ name: name[1], kind: 'p', struct: head[1], size: 0, init: /^\s*=/.test(part.slice(name[0].length)) });
+  });
+  return out;
+}
 
 function addStructFields(def, text) {
   for (const part of splitTop(text, ';')) {
     const body = part.trim();
     if (!body) continue;
-    const link = body.match(/^struct\s+([A-Za-z_]\w*)\s*\*\s*([A-Za-z_]\w*)$/);
-    if (link) { def.fields.push({ name: link[2], kind: 'p', target: link[1] }); continue; }
+    // "struct node *left, *right;" declares two links, not one - a tree lost both.
+    const links = structPtrVars(body);
+    if (links.length) { for (const l of links) def.fields.push({ name: l.name, kind: 'p', target: l.struct }); continue; }
     if (body.includes('*')) continue;
     for (const v of declarationsIn(body + ';')) def.fields.push({ name: v.name, kind: v.kind, fmt: v.fmt, size: v.size });
   }
@@ -195,7 +230,7 @@ function structuralOf(line) {
   }
   return out;
 }
-const FUNCTION = /^([A-Za-z_][\w \t\*]*?)\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{?\s*$/;
+const FUNCTION = /^([A-Za-z_][\w \t\*]*?)([\s\*]+)([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{?\s*$/;
 
 const BOUNDARY = /[;{}]\s*$/;
 const CONTROL = /^(if|else|for|while|do|switch)\b/;
@@ -217,8 +252,26 @@ export function instrument(source) {
   const walkable = new Set([...structs].filter(([, d]) => d.fields.some(f => f.kind === 'p' && f.target === d.name)).map(([n]) => n));
   const out = [];
   const scopes = [[]];
+  /**
+   * The per-step snippet that remembers and draws every struct pointer in scope.
+   *
+   * Every address a pointer has ever held is remembered, so a chain can be followed
+   * safely later: only known-good addresses are ever dereferenced. The guard matters
+   * because an unassigned "struct node *p;" holds whatever the stack had there, and
+   * walking that would dereference garbage.
+   */
+  const walkCode = scope => {
+    const pointers = scope.filter(v => v.kind === 'p' && walkable.has(v.struct));
+    if (!pointers.length) return '';
+    return '__ws_seen_n=0;' + pointers.map(v =>
+      'if(__ws_def_' + v.name + '){__ws_known_add((void*)' + v.name + ');__ws_walk_' + v.struct + '(' + v.name + ',0);}').join('');
+  };
   let count = 0;
   let previous = '';
+  // A "for" head that declares its counter and has no brace on the same line: the
+  // counter belongs to the loop statement, so it is parked here until the body is
+  // emitted and then handed to that body's scope instead of the enclosing one.
+  let pendingFor = [], pendingForSet = -1, inlineFor = null;
   let currentFunction = null;
   // Instrumentation is only valid inside a function body. A struct / union / enum
   // definition also opens a brace at file scope, so brace count alone cannot tell
@@ -234,6 +287,7 @@ export function instrument(source) {
       out.push(indent + marker(i + 1, visible(scopes)));
       count++;
       // Reads are recorded separately so the UI can light up the exact array cell.
+      const inScope = new Set(visible(scopes).map(v => v.name));
       for (const variable of visible(scopes)) {
         if (!variable.size) continue;
         const subscript = new RegExp('\\b' + variable.name + '\\s*\\[([^\\]]+)\\]', 'g');
@@ -241,17 +295,14 @@ export function instrument(source) {
         while ((hit = subscript.exec(body))) {
           const index = hit[1].trim();
           if (/[+-]{2}|=/.test(index)) continue;
+          // "for (int i = 0; i < n; i++) sum += a[i];" - i is not in scope until the
+          // loop starts, so recording this read here would not even compile.
+          if ((index.match(/[A-Za-z_]\w*/g) || []).some(n => !inScope.has(n))) continue;
           out.push(indent + 'printf("__WS_READ__%s|%d\\n","' + variable.name + '",(' + index + '));');
         }
       }
-      const pointers=visible(scopes).filter(v=>v.kind==='p'&&walkable.has(v.struct));
-      if(pointers.length)out.push(indent + '__ws_seen_n=0;');
-      for (const variable of pointers) {
-        // Every address a pointer has ever held is remembered, so a chain can be
-        // followed safely later: only known-good addresses are ever dereferenced.
-        out.push(indent + '__ws_known_add((void*)' + variable.name + ');');
-        out.push(indent + '__ws_walk_' + variable.struct + '(' + variable.name + ',0);');
-      }
+      const walks=walkCode(visible(scopes));
+      if(walks)out.push(indent + walks);
       if (currentFunction && currentFunction.ret && /^return\b/.test(body)) {
         const value = body.replace(/^return\b/, '').replace(/;\s*$/, '').trim();
         if (value) {
@@ -261,12 +312,52 @@ export function instrument(source) {
         out.push(indent + 'printf("__WS_RET__%s\\n","' + currentFunction.name + '");');
       }
     } else if (functionBase !== null && unbracedHead && !SKIP(body) && /;\s*$/.test(body)) {
+      // These wrapper braces are this statement's scope, which is where a counter
+      // declared by the loop head has to live.
+      const scope = scopes[scopes.length - 1];
+      for (const variable of pendingFor) scope.push(variable);
       out.push(indent + '{ ' + marker(i + 1, visible(scopes)) + ' ' + body + ' }');
       count++;
+      for (const variable of pendingFor) scope.pop();
+      pendingFor = [];
       previous = body;
       continue;
     }
-    out.push(raw);
+    // "for (int i = 0; i < n; i++) work(i);" would hide the whole loop from the trace,
+    // and the counter it declares belongs to the loop - left in the enclosing scope,
+    // every later marker would name a variable that is already gone. Braces around the
+    // body fix both and cannot change what the loop does.
+    let emit = raw;
+    if (functionBase !== null && !unbracedHead && body.slice(0, 3) === 'for') {
+      const open = body.indexOf('(');
+      const close = open < 0 ? -1 : matchParen(body, open);
+      if (close > 0 && !/[{}]/.test(body.slice(0, close))) {
+        const tail = body.slice(close).trim();
+        const head = body.match(/\bfor\s*\(([^;]*);/);
+        const decls = head ? declarationsIn(head[1] + ';') : [];
+        if (decls.length && tail.slice(-1) === ';') {
+          inlineFor = decls;
+          count++;
+          const bodyScope = visible(scopes.concat([decls]));
+          emit = indent + body.slice(0, close) + ' { ' + marker(i + 1, bodyScope) + walkCode(bodyScope) + ' ' + tail + ' }';
+        }
+      }
+    }
+    out.push(emit);
+    // Shadow state for the guard above: raised the moment the pointer is known to
+    // hold something the program put there. A declarator without an initialiser
+    // starts lowered, and any later assignment raises it.
+    if (functionBase !== null) {
+      const declared = structPtrVars(body);
+      if (declared.length) {
+        for (const variable of declared) out.push(indent + 'int __ws_def_' + variable.name + '=' + (variable.init ? 1 : 0) + ';');
+      } else {
+        for (const variable of visible(scopes).filter(v => v.kind === 'p')) {
+          const assigned = new RegExp('(?:^|[;{}(,]\\s*)' + variable.name + '\\s*=(?!=)');
+          if (assigned.test(body)) out.push(indent + '__ws_def_' + variable.name + '=1;');
+        }
+      }
+    }
     // An initialiser such as "= {1, 2, 3}" carries braces that are not a scope
     // and would inflate the depth, hiding the declaration itself.
     const structural = structuralOf(raw);
@@ -277,32 +368,51 @@ export function instrument(source) {
     const isFunctionHead = braceDepth === 0 && opens > 0 && /\(/.test(body);
     for (let n = 0; n < opens; n++) scopes.push([]);
     for (let n = 0; n < closes; n++) if (scopes.length > 1) scopes.pop();
+    // The body of an un-braced loop head is the next line; when that line opens a
+    // brace, the counter belongs inside it so that it dies with the block.
+    if (opens > 0 && pendingFor.length) { scopes[scopes.length - 1].push(...pendingFor); pendingFor = []; }
     braceDepth += opens - closes;
     if (functionBase !== null && braceDepth < functionBase) functionBase = null;
     if (!isFunctionHead && opens === 0) {
       for (const variable of declarationsIn(body)) scopes[scopes.length - 1].push(variable);
     }
     // "struct node* p" is a pointer, not a value: it is shown as a graph node.
-    const sv = functionBase !== null ? body.match(STRUCT_PTR_VAR) : null;
-    if (sv) scopes[scopes.length - 1].push({ name: sv[2], kind: 'p', struct: sv[1], size: 0 });
+    if (functionBase !== null) for (const variable of structPtrVars(body)) scopes[scopes.length - 1].push(variable);
     // "for (int i = 0; ...)" declares its counter in the loop's own scope, and a
     // brace on the same line would otherwise hide it from the scan above.
     const header = raw.match(/\bfor\s*\(([^;]*);/);
-    if (header) for (const variable of declarationsIn(header[1] + ';')) scopes[scopes.length - 1].push(variable);
+    if (header && !inlineFor) for (const variable of declarationsIn(header[1] + ';')) {
+      if (opens > 0) scopes[scopes.length - 1].push(variable);
+      else { pendingFor.push(variable); pendingForSet = i; }
+    }
     // A function header both opens the body's scope and declares its parameters.
     const fn = !isFunctionHead ? null : body.match(FUNCTION);
     if (fn) {
       functionBase = braceDepth;
-      // A pointer return type has no safe printf format, so only its exit is marked.
-      currentFunction = { name: fn[2], ret: /\*/.test(fn[1]) ? null : specifierOf(fn[1]) };
-      for (const part of splitTop(fn[3], ',')) {
-        for (const variable of declarationsIn(part.trim() + ';')) scopes[scopes.length - 1].push(variable);
+      // The stars belong to the return type, and a pointer return has no safe printf
+      // format, so only its exit is marked.
+      const retType = (fn[1] + fn[2]).trim();
+      currentFunction = { name: fn[3], ret: /\*/.test(retType) ? null : specifierOf(retType) };
+      for (const part of splitTop(fn[4], ',')) {
+        const param = part.trim();
+        for (const variable of declarationsIn(param + ';')) scopes[scopes.length - 1].push(variable);
+        // A struct pointer parameter is a real graph node - for a recursive tree walk
+        // it is the only thing that shows which subtree the call is working on.
+        for (const variable of structPtrVars(param)) scopes[scopes.length - 1].push(variable);
       }
       const scope = scopes[scopes.length - 1];
-      const fields = scope.map(v => v.kind + ':' + v.name + '=' + v.fmt);
-      out.push(indent + '  printf("__WS_CALL__%s' + (fields.length ? '|' + fields.join('|') : '') + '\\n","' + fn[2] + '"' +
-        (scope.length ? ',' + scope.map(v => v.name).join(',') : '') + ');');
+      // A parameter always holds a value the caller supplied, so its guard starts up.
+      for (const variable of scope) if (variable.kind === 'p') out.push(indent + '  int __ws_def_' + variable.name + '=1;');
+      // fieldsOf, not the variable itself: a pointer has no fmt of its own, and that
+      // undefined format is what a pointer parameter used to put straight into printf.
+      const fields = scope.flatMap(v => fieldsOf(v));
+      out.push(indent + '  printf("__WS_CALL__%s' + (fields.length ? '|' + fields.map(f => f.kind + ':' + f.label + '=' + f.fmt).join('|') : '') + '\\n","' + fn[3] + '"' +
+        (fields.length ? ',' + fields.map(f => f.expr).join(',') : '') + ');');
     }
+    // A counter parked for a body that never arrived would leak into whatever block is
+    // emitted next; dropping it is the safe direction.
+    if (pendingFor.length && pendingForSet !== i) { pendingFor = []; pendingForSet = -1; }
+    inlineFor = null;
     if (body) previous = body;
   }
   // The walker bodies dereference struct fields, so they go after the user's

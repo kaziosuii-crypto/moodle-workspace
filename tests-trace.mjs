@@ -10,6 +10,33 @@ const CASES = {
   'struct at file scope': ['#include <stdlib.h>', 'struct node {', '    int val;', '    struct node* next;', '};', 'enum colour { RED, GREEN };', 'int main(void) {', '    struct node* p = (struct node*)malloc(sizeof(struct node));', '    p->val = 7;', '    for (int i = 0; i < 3; i++) {', '        p->val = p->val + i;', '    }', '    printf("%d\\n", p->val);', '    free(p);', '    return 0;', '}'],
   'circular linked list': ['#include <stdlib.h>', 'struct listNode { int val; struct listNode* next; };', 'int main(void) {', '    struct listNode* head = (struct listNode*)malloc(sizeof(struct listNode));', '    head->val = 1;', '    struct listNode* cur = head;', '    for (int i = 2; i <= 4; i++) {', '        struct listNode* fresh = (struct listNode*)malloc(sizeof(struct listNode));', '        fresh->val = i;', '        cur->next = fresh;', '        cur = fresh;', '    }', '    cur->next = head;', '    struct listNode* now = head;', '    for (int k = 0; k < 3; k++) {', '        now = now->next;', '    }', '    printf("%d\\n", now->val);', '    free(head);', '    return 0;', '}'],
   'switch + nested loops': ['int main(void) {', '    int total = 0;', '    for (int i = 0; i < 3; i++) {', '        for (int j = 0; j < 3; j++) {', '            switch (i) {', '                case 0: total += 1; break;', '                default: total += 2;', '            }', '        }', '    }', '    printf("%d\\n", total);', '    return 0;', '}'],
+  // A one-line loop body used to hide the whole loop from the trace, and the counter
+  // the head declares leaked into the enclosing scope, so every later marker named a
+  // variable that no longer existed and the instrumented source no longer compiled.
+  'one-line for body': ['int main(void) {', '    int sum = 0;', '    for (int i = 0; i < 4; i++) sum += i;', '    printf("%d\\n", sum);', '    return 0;', '}'],
+  'unbraced for body': ['int main(void) {', '    int sum = 0;', '    for (int i = 0; i < 4; i++)', '        sum += i;', '    printf("%d\\n", sum);', '    return 0;', '}'],
+  'tree with 2 field declarators': ['#include <stdlib.h>', 'struct node { int val; struct node *left, *right; };', 'struct node *ins(struct node *t, int v) {', '    if (t == NULL) {', '        struct node *n = (struct node *)malloc(sizeof(struct node));', '        n->val = v; n->left = NULL; n->right = NULL;', '        return n;', '    }', '    if (v < t->val) t->left = ins(t->left, v);', '    else t->right = ins(t->right, v);', '    return t;', '}', 'int main(void) {', '    struct node *root = NULL;', '    int keys[7] = {5, 3, 8, 1, 4, 7, 9};', '    for (int i = 0; i < 7; i++) root = ins(root, keys[i]);', '    printf("%d\\n", root->val);', '    return 0;', '}'],
+  'list cursor (2 declarators)': ['#include <stdlib.h>', 'struct node {', '    int val;', '    struct node *next;', '};', 'int main(void) {', '    struct node *head = NULL, *p;', '    for (int i = 3; i >= 1; i--) {', '        p = (struct node *)malloc(sizeof(struct node));', '        p->val = i;', '        p->next = head;', '        head = p;', '    }', '    int sum = 0;', '    for (p = head; p != NULL; p = p->next) {', '        sum += p->val;', '    }', '    printf("%d\\n", sum);', '    return 0;', '}'],
+};
+
+/** Per-case assertions beyond "it compiles and prints the same".
+ *
+ * The cursor in "struct node *head = NULL, *p;" used to be invisible: only the
+ * first declarator was read, so a linked-list trace never showed the pointer that
+ * walks the list - the one variable the whole picture is about.
+ */
+const CHECKS = {
+  // A recursive builder whose return type is "struct node *" used to be skipped
+  // entirely, so the trace showed the call and none of the tree it built.
+  'tree with 2 field declarators': ({ trace }) => {
+    const most = Math.max(0, ...trace.steps.map(s => s.nodes.length));
+    return most >= 7 ? [] : ['only ' + most + ' of 7 nodes reached the walker'];
+  },
+  'list cursor (2 declarators)': ({ trace }) => {
+    const names = new Set(trace.steps.flatMap(s => s.vars.map(v => v.name)));
+    const missing = ['head', 'p'].filter(n => !names.has(n));
+    return missing.length ? ['no variable ' + missing.join(', ') + ' (saw ' + [...names].join(', ') + ')'] : [];
+  },
 };
 
 const run = async (code) => (await fetch('https://wandbox.org/api/compile.json', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({compiler:'gcc-head', code, options:'gnu17'}) })).json();
@@ -25,6 +52,7 @@ for (const [name, body] of Object.entries(CASES)) {
   if (String(b.status) !== '0') problems.push('status ' + b.status);
   if (trace.steps.length < inst.count) problems.push('steps ' + trace.steps.length + ' < markers ' + inst.count);
   if (trace.finalOutput !== a.program_output) problems.push('output ' + JSON.stringify(trace.finalOutput) + ' vs ' + JSON.stringify(a.program_output));
+  if (CHECKS[name]) problems.push(...CHECKS[name]({ inst, trace, plain }));
   if (problems.length) { fail++; console.log('FAIL  ' + name.padEnd(22) + problems.join(' | ')); }
   else { pass++; console.log('ok    ' + name.padEnd(22) + String(inst.count).padStart(3) + ' sites ' + String(trace.steps.length).padStart(3) + ' steps  out=' + JSON.stringify(trace.finalOutput)); }
 }
