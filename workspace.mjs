@@ -1050,16 +1050,60 @@ function graphOptions(spot,compact){
   const prevPointers=new Map(((spot.previous&&spot.previous.vars)||[]).filter(v=>v.kind==='p').map(v=>[v.name,v.value]));
   return {compact,pointers,prevPointers};
 }
+/** Wheel zoom and pointer pan. Both views call this — the canvas used to render
+ *  the graph without ever attaching it, which is why dragging did nothing. */
+function bindGraphNav(host){
+  if(!host)return;
+  const wrap=host.querySelector('.ts-graphwrap');
+  if(!wrap)return;
+  applyGraphView();
+  let drag=null;
+  wrap.addEventListener('wheel',event=>{
+    event.preventDefault();
+    const view=current.trace.view;
+    view.zoom=Math.min(2.5,Math.max(.15,view.zoom*(event.deltaY<0?1.12:.89)));
+    applyGraphView();
+  },{passive:false});
+  wrap.addEventListener('pointerdown',event=>{
+    if(event.target.closest('button'))return;
+    drag={x:event.clientX,y:event.clientY,ox:current.trace.view.x,oy:current.trace.view.y};
+    try{ wrap.setPointerCapture(event.pointerId); }catch{}
+    wrap.style.cursor='grabbing';
+  });
+  wrap.addEventListener('pointermove',event=>{
+    if(!drag)return;
+    event.preventDefault();
+    const view=current.trace.view;
+    view.x=drag.ox+(event.clientX-drag.x);view.y=drag.oy+(event.clientY-drag.y);
+    applyGraphView();
+  });
+  const stop=()=>{drag=null;wrap.style.cursor='';};
+  wrap.addEventListener('pointerup',stop);
+  wrap.addEventListener('pointercancel',stop);
+}
+/** Scale the graph so the whole structure is visible the moment the canvas opens. */
+function fitGraph(){
+  const wrap=$('.ts-graphwrap'),g=$('.ts-graph'),view=current?.trace?.view;
+  if(!wrap||!g||!view)return;
+  const w=g.offsetWidth||1,h=g.offsetHeight||1;
+  const availW=Math.max(120,wrap.clientWidth-80),availH=Math.max(120,wrap.clientHeight-24);
+  view.zoom=Math.max(.15,Math.min(1,Math.min(availW/w,availH/h)));
+  view.x=0;view.y=0;
+  applyGraphView();
+}
 function graphScreenHTML(){
   const trace=current.trace,spot=traceSpot();
   if(!spot)return '';
   const prev=graphKeys(spot.previous&&spot.previous.nodes);
+  // Plain variables belong on the canvas too, not only in the side panel.
+  const scalars=(spot.step.vars||[]).filter(v=>v.kind!=='p'&&v.name.indexOf('[')<0);
   return '<header class="ts-head"><span class="ts-dot"></span><span class="ts-title">数据画板</span>'+
     '<span class="ts-step">'+esc(traceLabel())+' · '+spot.step.nodes.length+' 个节点</span><span class="grow"></span>'+
     '<button data-action="trace-play" class="ts-btn">'+(trace.playing?'暂停':'播放')+'</button>'+
     '<button data-action="trace-prev" class="ts-btn">上一步</button>'+
     '<button data-action="trace-next" class="ts-btn">下一步</button>'+
     '<button data-action="graph-close" class="ts-btn">退出</button></header>'+
+    (scalars.length?'<div class="ts-scalars">'+scalars.map(v=>'<span class="ts-scalar"><b>'+esc(v.name)+'</b><span>'+esc(v.value)+'</span></span>').join('')+'</div>':'')+
     '<div class="ts-graphwrap">'+graphHTML(spot.step.nodes,prev,graphOptions(spot,false))+'</div>';
 }
 function renderGraphScreen(){
@@ -1082,6 +1126,8 @@ function openGraphScreen(){
   };
   renderGraphScreen();
   motion(host,{opacity:[0,1],duration:220});
+  bindGraphNav(host);
+  requestAnimationFrame(()=>fitGraph());
   setTimeout(()=>host.focus(),30);
 }
 function closeGraphScreen(){
@@ -1110,12 +1156,10 @@ function graphHTML(nodes,prev,options){
   if(compact)nodes=order;
   const pos=new Map();
   let width,height;
-  if(cyclic&&!compact){
-    const R=Math.max(170,Math.round(order.length*(W*0.62)/Math.PI));
-    const cx=R+W/2+10, cy=R+H/2+10;
-    order.forEach((n,i)=>{const a=-Math.PI/2+i*2*Math.PI/order.length;pos.set(n.addr,{x:cx+R*Math.cos(a)-W/2,y:cy+R*Math.sin(a)-H/2});});
-    width=2*R+W+20; height=2*R+H+20;
-  }else{
+  {
+    // A closed chain simply gets one more cell, so the return edge spans the row
+    // instead of a whole circle of mostly empty space.
+    if(cyclic&&!compact)order.push(order[0]);
     const rows=Math.ceil(order.length/cols);
     order.forEach((n,i)=>{
       const row=Math.floor(i/cols), col=i%cols;
@@ -1214,7 +1258,8 @@ function renderTraceScreen(){
         '<button data-action="trace-close" class="ts-btn">退出全屏</button>'+
       '</header>'+
       '<div class="ts-stack">'+stackHTML(spot.step.stack,spot.step.returns)+'</div>'+
-      (spot.step.nodes.length?'<div class="ts-graphwrap preview">'+graphHTML(spot.step.nodes,graphKeys(spot.previous&&spot.previous.nodes),graphOptions(spot,true))+
+      (spot.step.nodes.length?'<div class="ts-preview">'+'<div class="ts-graphwrap preview">'+graphHTML(spot.step.nodes,graphKeys(spot.previous&&spot.previous.nodes),graphOptions(spot,true))+
+        '</div><div class="ts-preview-bar">'+'<span class="ts-preview-note">预览，只显示前 '+Math.min(8,spot.step.nodes.length)+' 个节点</span>'+
         '<button class="ts-canvas-open" data-action="graph-full">打开数据画板 · 共 '+spot.step.nodes.length+' 个节点</button></div>':'')+
       '<div class="ts-body">'+
         '<div class="ts-code">'+traceCodeHTML(spot.step.line,4)+'</div>'+
@@ -1268,29 +1313,7 @@ function renderTraceScreen(){
     path.style.strokeDasharray=len; path.style.strokeDashoffset=len;
     motion(path,{strokeDashoffset:[len,0],duration:460,delay:280,ease:'outCubic'});
   });
-  const wrap=host.querySelector('.ts-graphwrap');
-  if(wrap){
-    applyGraphView();
-    let drag=null;
-    wrap.addEventListener('wheel',event=>{
-      event.preventDefault();
-      const view=current.trace.view;
-      view.zoom=Math.min(2.5,Math.max(.3,view.zoom*(event.deltaY<0?1.12:.89)));
-      applyGraphView();
-    },{passive:false});
-    wrap.addEventListener('pointerdown',event=>{
-      if(event.target.closest('button'))return;
-      drag={x:event.clientX,y:event.clientY,ox:current.trace.view.x,oy:current.trace.view.y};
-      try{ wrap.setPointerCapture(event.pointerId); }catch{}
-    });
-    wrap.addEventListener('pointermove',event=>{
-      if(!drag)return;
-      const view=current.trace.view;
-      view.x=drag.ox+(event.clientX-drag.x);view.y=drag.oy+(event.clientY-drag.y);
-      applyGraphView();
-    });
-    wrap.addEventListener('pointerup',()=>{drag=null;});
-  }
+  bindGraphNav(host);
   const seek=host.querySelector('[data-trace-seek]');
   if(seek)seek.oninput=event=>{clearInterval(traceTimer);traceTimer=null;current.trace.playing=false;traceGoto(Number(event.target.value)-1);};
 }

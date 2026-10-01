@@ -194,6 +194,16 @@ input,textarea,select{transition:border-color var(--t-fast) var(--ease),box-shad
 .graph-screen{position:absolute;inset:0;z-index:90;background:#fff;display:flex;overflow:hidden}
 .gcanvas{flex:1;display:flex;flex-direction:column;min-width:0}
 .graph-screen .ts-graphwrap{flex:1;max-height:none;padding:20px 40px}
+.ts-preview{display:flex;flex-direction:column;flex:none;border-bottom:1px solid #f2f2f2}
+.ts-preview .ts-graphwrap{max-height:150px;border-bottom:0;cursor:default;padding-bottom:2px}
+.ts-preview-bar{display:flex;align-items:center;gap:10px;padding:0 40px 10px}
+.ts-preview-note{font-size:11px;color:#b0b0b0}
+.ts-canvas-open{position:static;font-size:12px;padding:6px 12px;background:#eef6ff;color:#1686ef;border-radius:7px;font-weight:600}
+.ts-canvas-open:hover{background:#e2efff}
+.ts-scalars{display:flex;flex-wrap:wrap;gap:8px;padding:10px 40px 4px;flex:none}
+.ts-scalar{display:inline-flex;align-items:baseline;gap:6px;background:#f5f6f8;border:1px solid #e8e8ea;border-radius:6px;padding:3px 10px}
+.ts-scalar b{font-family:var(--font-mono);font-size:11.5px;color:#3f3f46}
+.ts-scalar span{font-family:var(--font-mono);font-size:11.5px;color:#1686ef}
 .ts-graphwrap.preview{max-height:150px;cursor:default}
 .ts-graphwrap.preview .ts-zoom{display:none}
 .ts-canvas-open{position:absolute;right:40px;top:14px;font-size:12px;padding:6px 12px;background:#eef6ff;color:#1686ef;border-radius:7px;font-weight:600}
