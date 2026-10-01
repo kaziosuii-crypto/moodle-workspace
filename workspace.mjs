@@ -1871,6 +1871,9 @@ function renderTrace(){
   if(!spot)return;
   const step=spot.step;
   const compactChanges=changedValues(spot.previous,spot.step);
+  // 数组元素单独成条，不然一个 4x4 的表格会摊成十六张平铺的小卡片。
+  const compactVars=groupVars(step.vars);
+  const compactChanged=new Set(compactChanges.map(c=>c.name));
   const pct=Math.round(((spot.index+1)/spot.total)*100);
   replaceContent(host,'<section class="trace">'+
     '<div class="trace-bar">'+
@@ -1883,9 +1886,10 @@ function renderTrace(){
       '<span class="trace-count">'+esc(traceLabel())+(trace.skip&&trace.skip.length?' · '+esc(skipBadge(trace.skip)):'')+'</span>'+
     '</div>'+
     '<div class="trace-progress"><span style="width:'+pct+'%"></span></div>'+
-    '<div class="trace-vars">'+(step.vars&&step.vars.length
-      ? step.vars.map(v=>traceVarHTML(v,compactChanges.find(c=>c.name===v.name))).join('')
-      : '<span class="trace-none">这一步还没有可见的变量</span>')+'</div>'+
+    '<div class="trace-vars">'+(compactVars.scalars.length
+      ? compactVars.scalars.map(v=>traceVarHTML(v,compactChanges.find(c=>c.name===v.name))).join('')
+      : (compactVars.arrays.size?'':'<span class="trace-none">这一步还没有可见的变量</span>'))+'</div>'+
+    (compactVars.arrays.size?'<div class="trace-arrays">'+[...compactVars.arrays].map(([name,cells])=>arrayHTML(name,cells,step.reads,compactChanged)).join('')+'</div>':'')+
     '<div class="trace-body">'+
       '<label class="field"><span class="field-head">本步之前的输出</span><pre class="trace-out">'+eolMark(step.output||'（还没有输出）')+'</pre></label>'+
       '<label class="field"><span class="field-head">程序最终输出</span><pre class="trace-out">'+eolMark(trace.finalOutput||'（没有输出）')+'</pre></label>'+

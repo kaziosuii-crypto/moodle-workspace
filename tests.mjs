@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
 import { readFileSync } from 'node:fs';
 import { cleanSuggestion, copilotPrompt, copilotWorthAsking } from './copilot.mjs';
-import { skippedSteps } from './trace.mjs';
+import { skippedSteps, declarationsIn } from './trace.mjs';
 import { ioText, richContent, formatTime, parseProblem, parseNavigation, parseResult, safeURL } from './adapter.mjs';
 import { parseTutorResponse, tutorNarrative, tutorPrompt } from './tutor.mjs';
 const base='http://example.test/moodle/mod/programming/view.php?a=117';
@@ -80,6 +80,22 @@ test('tutor prompt keeps test inputs expected outputs and submission evidence',(
 });
 
 const FENCE=String.fromCharCode(96).repeat(3);
+test('数组带着维度和元素类型被识别，不再被当成指针丢掉',()=>{
+  const arr=declarationsIn('int arr[5] = {1,2,3,4,5};')[0];
+  assert.deepEqual(arr.dims,[5]);
+  assert.equal(arr.kind,'i');
+  // 字符串表格：元素是指针，'*' 属于元素类型，不能让整条声明变成不可读的指针。
+  const table=declarationsIn('const char *weather[][4] = {')[0];
+  assert.deepEqual(table.dims,[0,4]);
+  assert.equal(table.kind,'s');
+  assert.equal(table.pointer,true);
+  const grid=declarationsIn('int grid[2][3] = {{1,2,3},{4,5,6}};')[0];
+  assert.deepEqual(grid.dims,[2,3]);
+  // 真正的标量指针仍然不追踪。
+  assert.equal(declarationsIn('int *p = &x;').length,0);
+  assert.equal(declarationsIn('char buf[8] = "hi";')[0].kind,'s');
+});
+
 test('跳行模式下被跨过的原始步会被完整记下来',()=>{
   const steps=[{line:1},{line:2},{line:2},{line:2},{line:3}];
   assert.deepEqual(skippedSteps(steps,0,4).map(s=>s.raw),[1,2,3]);

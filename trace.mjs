@@ -64,6 +64,9 @@ function matchParen(text, from) {
   return -1;
 }
 
+/** "arr[2][3]" -> the stars, the name, and the bracket groups. */
+const ARRAY_DECL = /^\s*(\*+)?\s*([A-Za-z_]\w*)\s*((?:\[[^\]]*\])+)/;
+
 /** Names and kinds declared by one line, or [] when it declares nothing usable. */
 export function declarationsIn(line) {
   const body = line.trim();
@@ -71,23 +74,74 @@ export function declarationsIn(line) {
   if (!match) return [];
   const base = specifierOf(match[0]);
   if (!base) return [];
-  let rest = body.slice(match[0].length).replace(/;\s*$/, '');
-  if (!rest || rest.includes('*')) return [];           // pointers are left alone
+  const rest = body.slice(match[0].length).replace(/;\s*$/, '');
+  if (!rest) return [];
   if (/\(/.test(rest.split('=')[0])) return [];          // a function, not a variable
   const out = [];
   for (const part of splitTop(rest, ',')) {
-    const name = part.match(/^\s*([A-Za-z_]\w*)\s*(?:\[(\s*\d*\s*)\])?/);
+    const array = part.match(ARRAY_DECL);
+    if (array) {
+      // "const char *w[][4]" is an array whose elements are pointers: the '*' belongs
+      // to the element type and must not make the whole thing look like an opaque
+      // pointer, which is how a table of strings used to vanish from the panel.
+      const dims = [...array[3].matchAll(/\[([^\]]*)\]/g)].map(m => Number(m[1].trim()) || 0);
+      const pointer = !!array[1];
+      // A char array is a string; a char* element array is an array of strings. Either
+      // way the kind is 's', and the pointer flag is what tells the two apart.
+      const kind = base.kind === 'c' ? 's' : base.kind;
+      out.push({ name: array[2], kind, fmt: kind === 's' ? '%.40s' : base.fmt, dims, pointer,
+        size: dims.length === 1 ? Math.min(dims[0], 8) : 0 });
+      continue;
+    }
+    if (part.includes('*')) continue;                    // scalar pointers are left alone
+    const name = part.match(/^\s*([A-Za-z_]\w*)/);
     if (!name) continue;
-    const tail = part.slice(name[0].length);
-    if (name[2] !== undefined) {
-      // "int arr[]" has no known length, and "int grid[2][3]" would print the
-      // inner row (a pointer) as a number. Both are dropped rather than guessed.
-      if (!name[2].trim()) continue;
-      if (/^\s*\[/.test(tail)) continue;
-      out.push({ name: name[1], kind: base.kind === 'c' ? 's' : base.kind, fmt: base.kind === 'c' ? '%.40s' : base.fmt, size: Math.min(Number(name[2].trim()) || 0, 8) });
-    } else out.push({ name: name[1], kind: base.kind, fmt: base.fmt, size: 0 });
+    out.push({ name: name[1], kind: base.kind, fmt: base.fmt, size: 0 });
   }
   return out;
+}
+
+/** How many items the initialiser starting at `open` lists at its top level. */
+function countElements(text, open) {
+  let depth = 0, items = 0, filled = false;
+  for (let i = open; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"' || c === "'") {
+      const quote = c;
+      for (i++; i < text.length && text[i] !== quote; i++) if (text[i] === '\\') i++;
+      if (depth === 1 && !filled) { items++; filled = true; }
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '/') { while (i < text.length && text[i] !== '\n') i++; continue; }
+    if (c === '/' && text[i + 1] === '*') { i += 2; while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++; i++; continue; }
+    if (c === '{') { if (depth === 1 && !filled) { items++; filled = true; } depth++; continue; }
+    if (c === '}') { if (--depth === 0) break; continue; }
+    if (c === ',') { if (depth === 1) filled = false; continue; }
+    if (depth === 1 && !filled && !/\s/.test(c)) { items++; filled = true; }
+  }
+  return items;
+}
+
+/**
+ * Sizes for arrays whose first dimension is written as [].
+ *
+ * "const char *w[][4] = {" gives the row width but not the row count; that comes from
+ * the initialiser, which can be several lines further down. The source is scanned once so
+ * the declaration can be given the shape it actually has.
+ */
+function arrayShapes(source) {
+  const text = String(source || '');
+  const shapes = new Map();
+  const re = /([A-Za-z_]\w*)\s*((?:\[\s*\d*\s*\])+)\s*=\s*\{/g;
+  let match;
+  while ((match = re.exec(text))) {
+    const dims = [...match[2].matchAll(/\[\s*(\d*)\s*\]/g)].map(m => Number(m[1]) || 0);
+    if (!dims.some(d => !d)) continue;
+    if (!dims[0]) dims[0] = countElements(text, text.indexOf('{', re.lastIndex - 1));
+    if (dims.some(d => !d)) continue;
+    shapes.set(match[1], dims);
+  }
+  return shapes;
 }
 
 /** "int a" -> one printable field per name, arrays expanded element by element. */
@@ -95,14 +149,31 @@ function fieldsOf(variable) {
   // A pointer is a value like any other — it is the (void*) of its address, and
   // the UI draws it as an arrow to whatever lives there.
   if (variable.kind === 'p') return [{ label: variable.name, expr: '(void*)' + variable.name, kind: 'p', fmt: '%p' }];
-  if (!variable.size) return [{ label: variable.name, expr: variable.name, kind: variable.kind, fmt: variable.fmt }];
+  const dims = (variable.dims || []).map(d => Math.min(d, 8));
+  // An unresolved size cannot be printed at all, and a very large one would flood every
+  // single step with fields, so both are left out rather than guessed.
+  if (dims.some(d => !d)) return [];
+  if (dims.reduce((a, b) => a * b, 1) > 32) return [];
+  if (!dims.length) return [{ label: variable.name, expr: variable.name, kind: variable.kind, fmt: variable.fmt }];
   // A char array is one string. Expanding it would print each element with %s,
   // i.e. dereference a char as a pointer.
-  if (variable.kind === 's') return [{ label: variable.name, expr: variable.name, kind: 's', fmt: '%.40s' }];
-  const fields = [];
-  for (let i = 0; i < variable.size; i++) {
-    fields.push({ label: variable.name + '[' + i + ']', expr: variable.name + '[' + i + ']', kind: variable.kind, fmt: variable.fmt });
+  if (dims.length === 1 && variable.kind === 's' && !variable.pointer) {
+    return [{ label: variable.name, expr: variable.name, kind: 's', fmt: '%.40s' }];
   }
+  const fields = [];
+  const walk = (suffix, depth) => {
+    if (depth === dims.length) {
+      const ref = variable.name + suffix;
+      // A char* element may be NULL, and %s on NULL is undefined - glibc prints "(null)",
+      // other runtimes crash - so the expression guards it.
+      fields.push(variable.kind === 's'
+        ? { label: ref, expr: '(' + ref + ' ? ' + ref + ' : "(null)")', kind: 's', fmt: '%.40s' }
+        : { label: ref, expr: ref, kind: variable.kind, fmt: variable.fmt });
+      return;
+    }
+    for (let i = 0; i < dims[depth]; i++) walk(suffix + '[' + i + ']', depth + 1);
+  };
+  walk('', 0);
   return fields;
 }
 
@@ -158,7 +229,9 @@ function addStructFields(def, text) {
     const links = structPtrVars(body);
     if (links.length) { for (const l of links) def.fields.push({ name: l.name, kind: 'p', target: l.struct }); continue; }
     if (body.includes('*')) continue;
-    for (const v of declarationsIn(body + ';')) def.fields.push({ name: v.name, kind: v.kind, fmt: v.fmt, size: v.size });
+    // An array field would decay to a pointer and be printed with %d, so it is left out
+    // of the walker rather than printed as garbage.
+    for (const v of declarationsIn(body + ';')) if (!v.dims || !v.dims.length) def.fields.push({ name: v.name, kind: v.kind, fmt: v.fmt, size: v.size });
   }
 }
 
@@ -266,6 +339,14 @@ export function instrument(source) {
   const lines = String(source || '').split('\n');
   const structs = structDefs(source);
   const walkable = new Set([...structs].filter(([, d]) => d.fields.some(f => f.kind === 'p' && f.target === d.name)).map(([n]) => n));
+  const shapes = arrayShapes(source);
+  /** Fill in a "[]" first dimension from the source's initialiser. */
+  const resolveShape = variable => {
+    if (!variable.dims || !variable.dims.some(d => !d)) return variable;
+    const known = shapes.get(variable.name);
+    if (!known) return variable;
+    return { ...variable, dims: known, size: known.length === 1 ? Math.min(known[0], 8) : 0 };
+  };
   const out = [];
   const scopes = [[]];
   /**
@@ -422,7 +503,7 @@ export function instrument(source) {
     braceDepth += opens - closes;
     if (functionBase !== null && braceDepth < functionBase) functionBase = null;
     if (!isFunctionHead && opens === 0) {
-      for (const variable of declarationsIn(body)) scopes[scopes.length - 1].push(variable);
+      for (const variable of declarationsIn(body)) scopes[scopes.length - 1].push(resolveShape(variable));
     }
     // "struct node* p" is a pointer, not a value: it is shown as a graph node.
     if (functionBase !== null) for (const variable of structPtrVars(body)) scopes[scopes.length - 1].push(variable);
