@@ -61,7 +61,9 @@ if (REPO.gitee.user && gtToken) {
     body: JSON.stringify({ access_token: gtToken, name: r, description: 'Moodle 编程工作区（油猴脚本）', private: false, has_issues: true, auto_init: false }) });
   const exists = /已存在|already|has already/.test(JSON.stringify(made.body));
   console.log('gitee repo: ' + (made.ok ? 'created' : exists ? 'already exists' : 'FAILED ' + JSON.stringify(made.body).slice(0, 200)));
-  try { git(['push', '--quiet', '--force', 'https://' + u + ':' + gtToken + '@gitee.com/' + u + '/' + r + '.git', 'HEAD:master']); }
+  // Gitee rejects "<user>:<token>"; the token must be paired with the literal
+  // username "oauth2".
+  try { git(['push', '--quiet', '--force', 'https://oauth2:' + gtToken + '@gitee.com/' + u + '/' + r + '.git', 'HEAD:master']); }
   catch { console.log('gitee push FAILED — create the repo at https://gitee.com/projects/new first (name: ' + r + ', 开源), then run publish.mjs again.'); }
   console.log('gitee: https://gitee.com/' + u + '/' + r);
 } else console.log('gitee: skipped (need REPO.gitee.user and GITEE_TOKEN)');
