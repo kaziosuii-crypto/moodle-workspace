@@ -237,6 +237,9 @@ input,textarea,select{transition:border-color var(--t-fast) var(--ease),box-shad
 .trace-var b{font-weight:600;color:#3f3f46;font-family:var(--font-mono);font-size:11.5px}
 .trace-var span{color:#1686ef;font-family:var(--font-mono);font-size:11.5px;font-variant-numeric:tabular-nums}
 .trace-var span i{color:#a0a0a0;font-style:normal;margin-left:4px}
+.trace-var .reel{position:relative;display:inline-block}
+.trace-var .reel-new{position:relative;display:inline-block}
+.trace-var .reel-old{position:absolute;left:0;top:0;color:#c4c4c4;text-decoration:line-through;pointer-events:none;white-space:nowrap}
 .trace-none{font-size:11.5px;color:#aaa}
 .trace-body{display:grid;gap:14px;grid-template-columns:1fr 1fr}
 .trace-out{margin:0;font-family:var(--font-mono);font-size:12.5px;line-height:1.75;white-space:pre-wrap;overflow-wrap:anywhere;

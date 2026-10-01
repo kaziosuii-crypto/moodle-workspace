@@ -10,7 +10,7 @@ import { esc, text, safeURL, ioDisplay, parseProblem, parseNavigation, parseResu
 import { parseCompileIssues, diffBlock, describeDiff } from './diagnostics.mjs';
 import { SANDBOX_SOURCE } from './sandbox.mjs';
 import { getKey, setKey, hasKey, maskKey } from './ai-key.mjs';
-import { instrument, parseTrace, describeStep, viewIndices, changedNames } from './trace.mjs';
+import { instrument, parseTrace, describeStep, viewIndices, changedNames, changedValues } from './trace.mjs';
 import { animate, stagger } from 'animejs';
 import { AI_CONFIG } from './ai-config.mjs';
 import { llm } from './ai.mjs';
@@ -973,11 +973,24 @@ function traceCodeHTML(center,radius){
   }
   return html;
 }
-function traceVarHTML(v,changed){
-  const cls='trace-var'+(changed?' changed':'');
-  if(v.kind==='s')return '<span class="'+cls+'"><b>'+esc(v.name)+'</b><span>'+esc(v.value||'""')+'</span></span>';
-  if(v.kind==='c'){const code=Number(v.value)||0;return '<span class="'+cls+'"><b>'+esc(v.name)+'</b><span>'+esc("'"+String.fromCharCode(code)+"'")+'<i>'+code+'</i></span></span>';}
-  return '<span class="'+cls+'"><b>'+esc(v.name)+'</b><span>'+esc(v.value)+'</span></span>';
+/** Render a value the same way wherever it appears. */
+function traceValue(v,raw){
+  if(v.kind==='s')return raw||'""';
+  if(v.kind==='c'){const code=Number(raw)||0;return "'"+String.fromCharCode(code)+"' "+code;}
+  return String(raw);
+}
+/**
+ * A value that changed shows the transition: the old value lifts away struck
+ * through while the new one rises into place. Showing only the new number hides
+ * the one thing a learner needs to see.
+ */
+function traceVarHTML(v,change){
+  const cls='trace-var'+(change?' changed':'');
+  const body=change
+    ?'<span class="reel"><span class="reel-old">'+esc(traceValue(v,change.from))+'</span>'+
+      '<span class="reel-new">'+esc(traceValue(v,v.value))+'</span></span>'
+    :'<span>'+esc(traceValue(v,v.value))+'</span>';
+  return '<span class="'+cls+'"><b>'+esc(v.name)+'</b>'+body+'</span>';
 }
 /** Split "arr[0]=4 i=2" into scalars plus arrays keyed by name. */
 function groupVars(vars){
@@ -1033,8 +1046,9 @@ function renderTraceScreen(){
   if(!host)return;
   const spot=traceSpot();
   if(!spot)return traceCloseScreen();
-  const trace=current.trace,changed=changedNames(spot.previous,spot.step);
-  const changedSet=new Set(changed),grouped=groupVars(spot.step.vars);
+  const trace=current.trace,changes=changedValues(spot.previous,spot.step);
+  const changedSet=new Set(changes.map(c=>c.name)),grouped=groupVars(spot.step.vars);
+  const changeOf=name=>changes.find(c=>c.name===name);
   host.innerHTML='<section class="tscreen">'+
       '<header class="ts-head">'+
         '<span class="ts-dot"></span><span class="ts-title">逐行执行</span>'+
@@ -1052,7 +1066,7 @@ function renderTraceScreen(){
         '<div class="ts-side">'+
           '<div class="ts-label">变量</div>'+
           '<div class="ts-vars">'+(grouped.scalars.length
-            ?grouped.scalars.map(v=>traceVarHTML(v,changed.includes(v.name))).join('')
+            ?grouped.scalars.map(v=>traceVarHTML(v,changeOf(v.name))).join('')
             :'<span class="trace-none">还没有可见的变量</span>')+'</div>'+
           (grouped.arrays.size?'<div class="ts-label">数组</div>'+[...grouped.arrays].map(([name,cells])=>arrayHTML(name,cells,spot.step.reads,changedSet)).join(''):'')+
           '<div class="ts-label">输出</div>'+
@@ -1070,8 +1084,15 @@ function renderTraceScreen(){
   // last and pop.
   const vars=host.querySelectorAll('.trace-var');
   motion(vars,{opacity:[0,1],translateY:[6,0],duration:240,delay:stagger(28),ease:'outCubic'});
+  // Value reel: the old number lifts away while the new one rises in.
+  host.querySelectorAll('.reel-old').forEach(old=>{
+    motion(old,{translateY:[-15],opacity:[1,0],duration:190,ease:'inCubic',onComplete:()=>old.remove()});
+  });
+  host.querySelectorAll('.reel-new').forEach(fresh=>{
+    motion(fresh,{translateY:[15,0],opacity:[0,1],duration:240,delay:80,ease:'outCubic'});
+  });
   const popped=host.querySelectorAll('.trace-var.changed');
-  if(popped.length)motion(popped,{scale:[1.22,1],duration:420,delay:stagger(40),ease:'outBack'});
+  if(popped.length)motion(popped,{scale:[1.1,1],duration:420,delay:stagger(40),ease:'outBack'});
   const now=host.querySelector('.ts-line.now');
   if(now)motion(now,{opacity:[.35,1],translateX:[-10,0],duration:280,ease:'outCubic'});
   const frames=host.querySelectorAll('.ts-frame');

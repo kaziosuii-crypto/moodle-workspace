@@ -284,9 +284,19 @@ export function viewIndices(steps, mode) {
 
 /** Variables that changed between two steps, by name. */
 export function changedNames(previous, current) {
+  return changedValues(previous, current).map(c => c.name);
+}
+
+/** Value changes as {name, from, to} so the UI can show the transition, not just the result. */
+export function changedValues(previous, current) {
   if (!previous) return [];
   const before = new Map((previous.vars || []).map(v => [v.name, v.value]));
-  return (current.vars || []).filter(v => before.get(v.name) !== v.value).map(v => v.name);
+  const out = [];
+  for (const v of current.vars || []) {
+    const from = before.get(v.name);
+    if (from !== undefined && from !== v.value) out.push({ name: v.name, from, to: v.value, kind: v.kind });
+  }
+  return out;
 }
 
 /** One plain sentence describing where the run is. */
