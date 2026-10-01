@@ -174,6 +174,30 @@ export function parseTrace(stdout) {
   return { steps, finalOutput: output };
 }
 
+/**
+ * Which recorded steps to play.
+ *
+ * A loop header runs once but its body is recorded once per iteration, so the
+ * raw trace is full of steps that never leave the line they are on. "skip" mode
+ * drops every step whose line matches the previously kept one, which collapses a
+ * whole enumeration into the moves that actually change line.
+ */
+export function viewIndices(steps, mode) {
+  if (mode !== 'skip') return steps.map((_, i) => i);
+  const kept = [];
+  for (let i = 0; i < steps.length; i++) {
+    if (!kept.length || steps[i].line !== steps[kept[kept.length - 1]].line) kept.push(i);
+  }
+  return kept;
+}
+
+/** Variables that changed between two steps, by name. */
+export function changedNames(previous, current) {
+  if (!previous) return [];
+  const before = new Map((previous.vars || []).map(v => [v.name, v.value]));
+  return (current.vars || []).filter(v => before.get(v.name) !== v.value).map(v => v.name);
+}
+
 /** One plain sentence describing where the run is. */
 export function describeStep(steps, index) {
   if (!steps.length) return '没有记录到任何执行步骤。';

@@ -10,7 +10,7 @@ import { esc, text, safeURL, ioDisplay, parseProblem, parseNavigation, parseResu
 import { parseCompileIssues, diffBlock, describeDiff } from './diagnostics.mjs';
 import { SANDBOX_SOURCE } from './sandbox.mjs';
 import { getKey, setKey, hasKey, maskKey } from './ai-key.mjs';
-import { instrument, parseTrace, describeStep } from './trace.mjs';
+import { instrument, parseTrace, describeStep, viewIndices, changedNames } from './trace.mjs';
 import { animate, stagger } from 'animejs';
 import { AI_CONFIG } from './ai-config.mjs';
 import { llm } from './ai.mjs';
@@ -918,54 +918,158 @@ function traceHighlight(line){
   ]});
   renderInlineDiagnosis();
 }
-function traceGoto(index){
+/** Raw steps played under the current mode. "skip" never repeats a line. */
+function traceView(){
   const trace=current?.trace;
-  if(!trace?.steps?.length)return;
-  trace.index=Math.max(0,Math.min(index,trace.steps.length-1));
-  traceHighlight(trace.steps[trace.index].line);
+  return trace?.steps?viewIndices(trace.steps,trace.mode||'skip'):[];
+}
+function traceSpot(){
+  const trace=current?.trace,view=traceView();
+  if(!trace||!view.length)return null;
+  const at=Math.min(Math.max(trace.cursor||0,0),view.length-1);
+  const raw=view[at],previous=trace.steps[view[at-1]];
+  return{step:trace.steps[raw],raw,index:at,total:view.length,previous};
+}
+function traceGoto(index){
+  const trace=current?.trace,view=traceView();
+  if(!trace||!view.length)return;
+  trace.cursor=Math.max(0,Math.min(index,view.length-1));
+  traceHighlight(trace.steps[view[trace.cursor]].line);
   renderTrace();
 }
 function tracePlay(){
-  const trace=current?.trace;
-  if(!trace?.steps?.length)return;
+  const trace=current?.trace,view=traceView();
+  if(!trace||!view.length)return;
   if(trace.playing){traceStop();return;}
   trace.playing=true;
-  trace.index=trace.index>=trace.steps.length-1?0:trace.index;
-  traceHighlight(trace.steps[trace.index].line);
+  if((trace.cursor||0)>=view.length-1)trace.cursor=0;
+  traceHighlight(trace.steps[view[trace.cursor]].line);
   renderTrace();
+  const period=Math.max(120,1100-(trace.speed??5)*90);
   traceTimer=setInterval(()=>{
     const state=current?.trace;
-    if(!state?.playing||!state.steps.length)return traceStop();
-    if(state.index>=state.steps.length-1)return traceStop();
-    state.index++;
-    traceHighlight(state.steps[state.index].line);
+    if(!state?.playing)return traceStop();
+    const list=traceView();
+    if((state.cursor||0)>=list.length-1)return traceStop();
+    state.cursor++;
+    traceHighlight(state.steps[list[state.cursor]].line);
     renderTrace();
-  },560);
+  },period);
 }
-function traceVarHTML(v){
-  if(v.kind==='s')return '<span class="trace-var"><b>'+esc(v.name)+'</b><span>'+esc(v.value||'""')+'</span></span>';
-  if(v.kind==='c'){
-    const code=Number(v.value)||0;
-    return '<span class="trace-var"><b>'+esc(v.name)+'</b><span>'+esc("'"+String.fromCharCode(code)+"'")+'<i>'+code+'</i></span></span>';
+function traceLabel(){
+  const spot=traceSpot();
+  if(!spot)return '没有可播放的步骤';
+  return '第 '+(spot.index+1)+' / '+spot.total+' 步 · 第 '+spot.step.line+' 行';
+}
+/** A few lines of source around the current one, as the studio view shows it. */
+function traceCodeHTML(center,radius){
+  if(!editor)return '';
+  const total=editor.state.doc.lines;
+  const from=Math.max(1,center-radius),to=Math.min(total,center+radius);
+  let html='';
+  for(let n=from;n<=to;n++){
+    const line=editor.state.doc.line(n).text;
+    html+='<div class="ts-line'+(n===center?' now':'')+'"><span class="ts-no">'+n+'</span><code>'+esc(line||' ')+'</code></div>';
   }
-  return '<span class="trace-var"><b>'+esc(v.name)+'</b><span>'+esc(v.value)+'</span></span>';
+  return html;
+}
+function traceVarHTML(v,changed){
+  const cls='trace-var'+(changed?' changed':'');
+  if(v.kind==='s')return '<span class="'+cls+'"><b>'+esc(v.name)+'</b><span>'+esc(v.value||'""')+'</span></span>';
+  if(v.kind==='c'){const code=Number(v.value)||0;return '<span class="'+cls+'"><b>'+esc(v.name)+'</b><span>'+esc("'"+String.fromCharCode(code)+"'")+'<i>'+code+'</i></span></span>';}
+  return '<span class="'+cls+'"><b>'+esc(v.name)+'</b><span>'+esc(v.value)+'</span></span>';
+}
+function traceOpenScreen(){
+  const trace=current?.trace;
+  if(!trace||trace.status!=='ready')return;
+  trace.fullscreen=true;
+  let host=$('[data-trace-screen]');
+  if(!host){host=document.createElement('div');host.className='trace-screen';host.setAttribute('data-trace-screen','');root.append(host);}
+  host.tabIndex=0;
+  host.onkeydown=event=>{
+    const t=current?.trace;if(!t)return;
+    if(event.key===' '||event.key==='Spacebar'){event.preventDefault();tracePlay();}
+    else if(event.key==='ArrowRight'){event.preventDefault();traceGoto((t.cursor||0)+1);}
+    else if(event.key==='ArrowLeft'){event.preventDefault();traceGoto((t.cursor||0)-1);}
+    else if(event.key==='Escape'){event.preventDefault();traceCloseScreen();}
+  };
+  motion(host,{opacity:[0,1],duration:220});
+  setTimeout(()=>host.focus(),30);
+  renderTrace();
+}
+function traceCloseScreen(){
+  if(current?.trace)current.trace.fullscreen=false;
+  const host=$('[data-trace-screen]');
+  if(host){stopWithin(host);host.remove();}
+  renderTrace();
+}
+function renderTraceScreen(){
+  const host=$('[data-trace-screen]');
+  if(!host)return;
+  const spot=traceSpot();
+  if(!spot)return traceCloseScreen();
+  const trace=current.trace,changed=changedNames(spot.previous,spot.step);
+  host.innerHTML='<section class="tscreen">'+
+      '<header class="ts-head">'+
+        '<span class="ts-dot"></span><span class="ts-title">逐行执行</span>'+
+        '<span class="ts-step">'+esc(traceLabel())+'</span>'+
+        '<span class="grow"></span>'+
+        '<button data-action="trace-mode" class="ts-btn mode">'+(trace.mode==='skip'?'跳行模式':'全部步骤')+'</button>'+
+        '<button data-action="trace-play" class="ts-btn">'+(trace.playing?'暂停':'播放')+'</button>'+
+        '<button data-action="trace-prev" class="ts-btn">上一步</button>'+
+        '<button data-action="trace-next" class="ts-btn">下一步</button>'+
+        '<button data-action="trace-close" class="ts-btn">退出全屏</button>'+
+      '</header>'+
+      '<div class="ts-body">'+
+        '<div class="ts-code">'+traceCodeHTML(spot.step.line,4)+'</div>'+
+        '<div class="ts-side">'+
+          '<div class="ts-label">变量</div>'+
+          '<div class="ts-vars">'+(spot.step.vars&&spot.step.vars.length
+            ?spot.step.vars.map(v=>traceVarHTML(v,changed.includes(v.name))).join('')
+            :'<span class="trace-none">这一步还没有可见的变量</span>')+'</div>'+
+          '<div class="ts-label">输出</div>'+
+          '<pre class="ts-out">'+eolMark(spot.step.output||'（暂无输出）')+'</pre>'+
+          '<div class="ts-label">最终输出</div>'+
+          '<pre class="ts-out dim">'+eolMark(trace.finalOutput||'（没有输出）')+'</pre>'+
+        '</div>'+
+      '</div>'+
+      '<footer class="ts-foot">'+
+        '<input class="trace-range" type="range" min="1" max="'+spot.total+'" value="'+(spot.index+1)+'" data-trace-seek aria-label="执行进度">'+
+        '<span class="ts-hint">空格 播放/暂停 · ← → 上一步/下一步 · 跳行模式会略过同一行上的重复执行</span>'+
+      '</footer>'+
+    '</section>';
+  // The chips that actually changed are the ones worth looking at, so they land
+  // last and pop.
+  const vars=host.querySelectorAll('.trace-var');
+  motion(vars,{opacity:[0,1],translateY:[6,0],duration:240,delay:stagger(28),ease:'outCubic'});
+  const popped=host.querySelectorAll('.trace-var.changed');
+  if(popped.length)motion(popped,{scale:[1.22,1],duration:420,delay:stagger(40),ease:'outBack'});
+  const now=host.querySelector('.ts-line.now');
+  if(now)motion(now,{opacity:[.35,1],translateX:[-10,0],duration:280,ease:'outCubic'});
+  const seek=host.querySelector('[data-trace-seek]');
+  if(seek)seek.oninput=event=>{clearInterval(traceTimer);traceTimer=null;current.trace.playing=false;traceGoto(Number(event.target.value)-1);};
 }
 function renderTrace(){
+  const trace=current?.trace;
+  if(trace?.fullscreen&&trace.status==='ready'&&$('[data-trace-screen]'))return renderTraceScreen();
   const host=$('[data-bottom-body]');
   if(!host)return;
-  const trace=current?.trace;
   if(!trace){replaceContent(host,'<div class="empty">'+icon('run')+'点「单步」把这段代码的执行过程演一遍。</div>');return;}
   if(trace.status==='loading'){replaceContent(host,loadingHTML(trace.message||'正在编译并记录执行过程','记录完成后可以逐步播放，也可以自动播放。'));animateLoading(host);return;}
   if(trace.status==='error'){replaceContent(host,'<div class="results"><div class="result-title red">无法记录执行过程<small></small></div><div class="result-detail"><pre>'+esc(trace.error)+'</pre></div></div>');return;}
-  const step=trace.steps[trace.index];
-  const pct=Math.round(((trace.index+1)/trace.steps.length)*100);
+  const spot=traceSpot();
+  if(!spot)return;
+  const step=spot.step;
+  const pct=Math.round(((spot.index+1)/spot.total)*100);
   replaceContent(host,'<section class="trace">'+
     '<div class="trace-bar">'+
       button('trace-prev','上一步','prev')+
       button('trace-play',trace.playing?'暂停':'自动播放','run')+
       button('trace-next','下一步','next')+
       button('trace-stop','停止','close')+
-      '<span class="trace-count">'+esc(describeStep(trace.steps,trace.index))+'</span>'+
+      button('trace-mode',trace.mode==='skip'?'跳行模式':'全部步骤','list')+
+      button('trace-screen','全屏','expand')+
+      '<span class="trace-count">'+esc(traceLabel())+'</span>'+
     '</div>'+
     '<div class="trace-progress"><span style="width:'+pct+'%"></span></div>'+
     '<div class="trace-vars">'+(step.vars&&step.vars.length
@@ -975,7 +1079,7 @@ function renderTrace(){
       '<label class="field"><span class="field-head">本步之前的输出</span><pre class="trace-out">'+eolMark(step.output||'（还没有输出）')+'</pre></label>'+
       '<label class="field"><span class="field-head">程序最终输出</span><pre class="trace-out">'+eolMark(trace.finalOutput||'（没有输出）')+'</pre></label>'+
     '</div>'+
-    '<input class="trace-range" type="range" min="1" max="'+trace.steps.length+'" value="'+(trace.index+1)+'" data-trace-seek aria-label="执行进度">'+
+    '<input class="trace-range" type="range" min="1" max="'+spot.total+'" value="'+(spot.index+1)+'" data-trace-seek aria-label="执行进度">'+
   '</section>');
   const seek=host.querySelector('[data-trace-seek]');
   if(seek)seek.oninput=event=>{clearInterval(traceTimer);traceTimer=null;current.trace.playing=false;traceGoto(Number(event.target.value)-1);};
@@ -987,7 +1091,8 @@ async function startTrace(){
   const input=current.draft.tests[testIndex]?.input ?? current.draft.tests[0]?.input ?? '';
   traceStop();
   setBusy(true);
-  current.trace={status:'loading',message:'正在编译并记录执行过程'};
+  const keep=current.trace||{};
+  current.trace={status:'loading',message:'正在编译并记录执行过程',mode:keep.mode||'skip',speed:keep.speed??5,fullscreen:!!keep.fullscreen};
   renderTrace();
   try{
     const module=await compileC(source,message=>{current.trace={status:'loading',message};renderTrace();});
@@ -995,7 +1100,7 @@ async function startTrace(){
     const {steps,finalOutput}=parseTrace(stdout);
     if(!steps.length)throw new Error('没有记录到任何执行步骤，代码可能一进入就退出了。');
     if(steps.length>=20000)toast('执行步数过多，只记录了前 20000 步。');
-    current.trace={status:'ready',steps,finalOutput,index:0,playing:false};
+    current.trace={status:'ready',steps,finalOutput,cursor:0,playing:false,mode:current.trace?.mode||'skip',speed:5,fullscreen:false};
     traceHighlight(steps[0].line);
   }catch(error){
     // Two ways a runaway program is stopped: the sandbox deadline, and the
@@ -1391,6 +1496,15 @@ async function handleClick(event) {
     case 'trace-prev':return traceGoto((current.trace?.index??0)-1);
     case 'trace-play':return tracePlay();
     case 'trace-stop':return traceStop();
+    case 'trace-screen':return traceOpenScreen();
+    case 'trace-close':return traceCloseScreen();
+    case 'trace-mode':{
+      const t=current?.trace;if(!t)return;
+      t.mode=t.mode==='skip'?'all':'skip';
+      t.cursor=0;
+      traceGoto(0);
+      return;
+    }
     case 'export':return openExport();
     case 'explain-error':return explainCompileErrors().catch(error=>toast(error.message));
     case 'generate':return openGenerateDialog();
