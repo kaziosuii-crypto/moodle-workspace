@@ -189,6 +189,21 @@ input,textarea,select{transition:border-color var(--t-fast) var(--ease),box-shad
 .ts-cell.changed{background:#fff4e0;border-color:#f0d29a;box-shadow:0 0 0 3px #fff4e0}
 .ts-cell.changed b{color:#9c7625}
 
+
+.ts-graphwrap{flex:none;padding:16px 40px 10px;overflow:auto;max-height:34vh;border-bottom:1px solid #f2f2f2}
+.ts-graph{position:relative}
+.ts-edges{position:absolute;left:0;top:0;pointer-events:none}
+.ts-edge{fill:none;stroke:#1686ef;stroke-width:1.6}
+.ts-edge.back{stroke-dasharray:6 4}
+.ts-edge.dangling{stroke:#c8c8c8;stroke-dasharray:3 3}
+.ts-node{position:absolute;background:#fff;border:1px solid #d9dee6;border-radius:10px;box-shadow:0 2px 10px #0000000f;
+  display:flex;flex-direction:column;align-items:flex-start;justify-content:center;padding:8px 11px;gap:3px;overflow:hidden}
+.ts-ntype{font-family:var(--font-mono);font-size:10px;color:#1686ef;background:#eef6ff;border-radius:4px;padding:1px 5px}
+.ts-naddr{position:absolute;right:8px;top:7px;font-family:var(--font-mono);font-size:9px;color:#c4c4c4}
+.ts-nf{display:flex;gap:6px;font-family:var(--font-mono);font-size:11.5px;line-height:1.5}
+.ts-nf i{font-style:normal;color:#9aa0a6}
+.ts-nf b{font-weight:600;color:#3f3f46}
+
 /* ---------------------------------------------------- 逐行执行 · 全屏剧场 */
 .trace-screen{position:absolute;inset:0;z-index:80;background:#fff;display:flex;overflow:hidden}
 .tscreen{flex:1;display:flex;flex-direction:column;min-width:0}

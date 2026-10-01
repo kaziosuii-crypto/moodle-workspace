@@ -1019,6 +1019,47 @@ function arrayHTML(name,cells,reads,changed){
       return '<span class="'+cls+'"><i>'+c.index+'</i><b>'+esc(c.value)+'</b></span>';
     }).join('')+'</div></div>';
 }
+/**
+ * Draw the struct graph for this step.
+ *
+ * Nodes are laid out on a fixed grid so arrow endpoints can be computed without
+ * measuring the DOM. A link is only drawn when its target address is one of the
+ * nodes this step actually captured, so a garbage or dangling pointer shows as a
+ * stub instead of a line to nowhere.
+ */
+function graphHTML(nodes){
+  const W=134,H=60,GX=58,GY=52,cols=Math.min(4,Math.max(1,nodes.length));
+  const pos=new Map();
+  nodes.forEach((n,i)=>pos.set(n.addr,{x:(i%cols)*(W+GX)+2,y:Math.floor(i/cols)*(H+GY)+2}));
+  const rows=Math.ceil(nodes.length/cols);
+  const width=cols*W+(cols-1)*GX+4, height=rows*H+(rows-1)*GY+4;
+  let boxes='',edges='';
+  for(const n of nodes){
+    const p=pos.get(n.addr);
+    boxes+='<div class="ts-node" style="left:'+p.x+'px;top:'+p.y+'px;width:'+W+'px;height:'+H+'px">'+
+      '<span class="ts-ntype">'+esc(n.type)+'</span><span class="ts-naddr">'+esc(String(n.addr).slice(-5))+'</span>'+
+      n.fields.filter(f=>f.kind!=='p').map(f=>'<span class="ts-nf"><i>'+esc(f.name)+'</i><b>'+esc(f.value)+'</b></span>').join('')+
+      '</div>';
+    for(const f of n.fields.filter(x=>x.kind==='p')){
+      const to=pos.get(f.value);
+      const sx=p.x+W, sy=p.y+H/2;
+      if(!to){ edges+='<path class="ts-edge dangling" d="M'+sx+' '+sy+' h20"/>'; continue; }
+      const tx=to.x, ty=to.y+H/2;
+      if(tx>sx){
+        edges+='<path class="ts-edge" marker-end="url(#ts-head)" d="M'+sx+' '+sy+' C'+(sx+22)+' '+sy+' '+(tx-22)+' '+ty+' '+tx+' '+ty+'"/>';
+      }else{
+        const by=Math.max(p.y,to.y)+H+20;
+        edges+='<path class="ts-edge back" marker-end="url(#ts-head)" d="M'+(p.x+W/2)+' '+(p.y+H)+' C'+(p.x+W/2)+' '+by+' '+(to.x+W/2)+' '+by+' '+(to.x+W/2)+' '+(to.y+H)+'"/>';
+      }
+    }
+  }
+  return '<div class="ts-graph" style="width:'+width+'px;height:'+(height+30)+'px">'+
+    '<svg class="ts-edges" width="'+(width+60)+'" height="'+(height+40)+'" style="overflow:visible">'+
+    '<defs><marker id="ts-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">'+
+    '<path d="M0 0 L10 5 L0 10 z" fill="#1686ef"/></marker>'+
+    '<marker id="ts-head-null" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">'+
+    '<path d="M0 0 L10 5 L0 10 z" fill="#c8c8c8"/></marker></defs>'+edges+'</svg>'+boxes+'</div>';
+}
 function traceOpenScreen(){
   const trace=current?.trace;
   if(!trace||trace.status!=='ready')return;
@@ -1063,6 +1104,7 @@ function renderTraceScreen(){
         '<button data-action="trace-close" class="ts-btn">退出全屏</button>'+
       '</header>'+
       '<div class="ts-stack">'+stackHTML(spot.step.stack,spot.step.returns)+'</div>'+
+      (spot.step.nodes.length?'<div class="ts-graphwrap">'+graphHTML(spot.step.nodes)+'</div>':'')+
       '<div class="ts-body">'+
         '<div class="ts-code">'+traceCodeHTML(spot.step.line,4)+'</div>'+
         '<div class="ts-side">'+
@@ -1105,6 +1147,16 @@ function renderTraceScreen(){
   if(hot.length)motion(hot,{scale:[1.24,1],duration:460,delay:stagger(60),ease:'outBack'});
   const back=host.querySelector('.ts-return');
   if(back)motion(back,{opacity:[0,1],translateY:[8,0],duration:300,delay:180,ease:'outCubic'});
+  // Nodes land in sequence, then each arrow draws itself towards its target.
+  const nodesEl=host.querySelectorAll('.ts-node');
+  if(nodesEl.length)motion(nodesEl,{opacity:[0,1],translateY:[10,0],duration:300,delay:stagger(55),ease:'outCubic'});
+  host.querySelectorAll('.ts-edge').forEach(path=>{
+    let len=0;
+    try{ len=path.getTotalLength(); }catch{ return; }
+    if(!len)return;
+    path.style.strokeDasharray=len; path.style.strokeDashoffset=len;
+    motion(path,{strokeDashoffset:[len,0],duration:460,delay:260,ease:'outCubic'});
+  });
   const seek=host.querySelector('[data-trace-seek]');
   if(seek)seek.oninput=event=>{clearInterval(traceTimer);traceTimer=null;current.trace.playing=false;traceGoto(Number(event.target.value)-1);};
 }
