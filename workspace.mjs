@@ -1156,11 +1156,23 @@ function renderCy(host,spot){
   }
   const before=new Set(cyView.elements().map(e=>e.id()));
   cyView.json({elements:cyElements(spot)});
-  try{
-    cyView.layout({name:'klay',klay:{direction:'RIGHT',spacing:34,edgeRouting:'ORTHOGONAL'},animate:false}).run();
-  }catch{
-    cyView.layout({name:'breadthfirst',directed:true,spacingFactor:1.2,animate:false}).run();
+  // KLay ranks a chain one node per column, which for 41 nodes is thousands of
+  // pixels wide and forces fit() to shrink the text into nothing. A chain is laid
+  // out as a wrapped grid shaped like the viewport instead; KLay keeps the job
+  // for structures that actually branch.
+  const count=spot.step.nodes.length;
+  const chain=spot.step.nodes.every(nd=>nd.fields.filter(f=>f.kind==='p').length<=1);
+  const rect=box.getBoundingClientRect();
+  const aspect=(rect.width||1200)/Math.max(240,rect.height||700);
+  const cols=Math.max(2,Math.min(12,Math.round(Math.sqrt(Math.max(1,count)*aspect))));
+  let placed=false;
+  if(!chain){
+    try{
+      cyView.layout({name:'klay',klay:{direction:'RIGHT',spacing:34,edgeRouting:'ORTHOGONAL'},animate:false}).run();
+      placed=true;
+    }catch{}
   }
+  if(!placed)cyView.layout({name:'grid',cols,avoidOverlap:true,padding:26,animate:false}).run();
   cyView.fit(undefined,44);
   cyView.elements().filter(e=>!before.has(e.id())).forEach(e=>{
     e.addClass('fresh');
@@ -1235,7 +1247,9 @@ function graphHTML(nodes,prev,options){
   for(const n of nodes)if(!seen.has(n.addr))order.push(n);
   const cyclic=order.length>2&&next.get(order[order.length-1].addr)===order[0].addr;
   if(compact)nodes=order;
-  const pointers=(options&&options.pointers)||[];
+  // The preview shows a slice of the graph, so a pointer aimed outside it would
+  // look dangling. Chips only appear on the full canvas.
+  const pointers=compact?[]:((options&&options.pointers)||[]);
   const prevPointers=(options&&options.prevPointers)||new Map();
   const CW=88,CH=26;
   const pos=new Map();
