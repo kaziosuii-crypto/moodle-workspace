@@ -134,7 +134,8 @@ export function structDefs(source) {
       if (!open) continue;
       current = { name: open[1], fields: [] };
       const rest = line.slice(line.indexOf('{') + 1);
-      if (rest.includes('}')) { structs.set(current.name, current); current = null; }
+      // A one-line struct still has fields to read, up to its closing brace.
+      if (rest.includes('}')) { addStructFields(current, rest.slice(0, rest.indexOf('}'))); structs.set(current.name, current); current = null; }
       else addStructFields(current, rest);
       continue;
     }
