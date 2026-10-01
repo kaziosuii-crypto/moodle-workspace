@@ -979,6 +979,31 @@ function traceVarHTML(v,changed){
   if(v.kind==='c'){const code=Number(v.value)||0;return '<span class="'+cls+'"><b>'+esc(v.name)+'</b><span>'+esc("'"+String.fromCharCode(code)+"'")+'<i>'+code+'</i></span></span>';}
   return '<span class="'+cls+'"><b>'+esc(v.name)+'</b><span>'+esc(v.value)+'</span></span>';
 }
+/** Split "arr[0]=4 i=2" into scalars plus arrays keyed by name. */
+function groupVars(vars){
+  const scalars=[],arrays=new Map();
+  for(const v of vars||[]){
+    const m=/^(.+)\[(\d+)\]$/.exec(v.name);
+    if(m){ if(!arrays.has(m[1]))arrays.set(m[1],[]); arrays.get(m[1]).push({index:Number(m[2]),value:v.value,kind:v.kind}); }
+    else scalars.push(v);
+  }
+  return{scalars,arrays};
+}
+/** The live call stack, with any value being returned on this step. */
+function stackHTML(stack,returns){
+  const frames=(stack||[]).map((name,i)=>'<span class="ts-frame'+(i===stack.length-1?' active':'')+'">'+esc(name)+'</span>').join('<i class="ts-arrow">›</i>');
+  const back=(returns||[]).length?'<span class="ts-return">'+esc(returns.map(r=>r.name+' 返回 '+(r.value===null?'—':r.value)).join('，'))+'</span>':'';
+  return '<span class="ts-stack-label">调用栈</span>'+(frames||'<span class="trace-none">—</span>')+back;
+}
+/** Arrays are drawn as cells: a cell being read pulses, a cell that changed glows. */
+function arrayHTML(name,cells,reads,changed){
+  const read=new Set((reads||[]).filter(r=>r.name===name).map(r=>r.index));
+  return '<div class="ts-array"><span class="ts-aname">'+esc(name)+'</span><div class="ts-cells">'+
+    cells.slice().sort((a,b)=>a.index-b.index).map(c=>{
+      const cls='ts-cell'+(read.has(c.index)?' read':'')+(changed.has(name+'['+c.index+']')?' changed':'');
+      return '<span class="'+cls+'"><i>'+c.index+'</i><b>'+esc(c.value)+'</b></span>';
+    }).join('')+'</div></div>';
+}
 function traceOpenScreen(){
   const trace=current?.trace;
   if(!trace||trace.status!=='ready')return;
@@ -1009,6 +1034,7 @@ function renderTraceScreen(){
   const spot=traceSpot();
   if(!spot)return traceCloseScreen();
   const trace=current.trace,changed=changedNames(spot.previous,spot.step);
+  const changedSet=new Set(changed),grouped=groupVars(spot.step.vars);
   host.innerHTML='<section class="tscreen">'+
       '<header class="ts-head">'+
         '<span class="ts-dot"></span><span class="ts-title">逐行执行</span>'+
@@ -1020,13 +1046,15 @@ function renderTraceScreen(){
         '<button data-action="trace-next" class="ts-btn">下一步</button>'+
         '<button data-action="trace-close" class="ts-btn">退出全屏</button>'+
       '</header>'+
+      '<div class="ts-stack">'+stackHTML(spot.step.stack,spot.step.returns)+'</div>'+
       '<div class="ts-body">'+
         '<div class="ts-code">'+traceCodeHTML(spot.step.line,4)+'</div>'+
         '<div class="ts-side">'+
           '<div class="ts-label">变量</div>'+
-          '<div class="ts-vars">'+(spot.step.vars&&spot.step.vars.length
-            ?spot.step.vars.map(v=>traceVarHTML(v,changed.includes(v.name))).join('')
-            :'<span class="trace-none">这一步还没有可见的变量</span>')+'</div>'+
+          '<div class="ts-vars">'+(grouped.scalars.length
+            ?grouped.scalars.map(v=>traceVarHTML(v,changed.includes(v.name))).join('')
+            :'<span class="trace-none">还没有可见的变量</span>')+'</div>'+
+          (grouped.arrays.size?'<div class="ts-label">数组</div>'+[...grouped.arrays].map(([name,cells])=>arrayHTML(name,cells,spot.step.reads,changedSet)).join(''):'')+
           '<div class="ts-label">输出</div>'+
           '<pre class="ts-out">'+eolMark(spot.step.output||'（暂无输出）')+'</pre>'+
           '<div class="ts-label">最终输出</div>'+
@@ -1046,6 +1074,14 @@ function renderTraceScreen(){
   if(popped.length)motion(popped,{scale:[1.22,1],duration:420,delay:stagger(40),ease:'outBack'});
   const now=host.querySelector('.ts-line.now');
   if(now)motion(now,{opacity:[.35,1],translateX:[-10,0],duration:280,ease:'outCubic'});
+  const frames=host.querySelectorAll('.ts-frame');
+  if(frames.length)motion(frames,{opacity:[0,1],scale:[.86,1],duration:260,delay:stagger(45),ease:'outBack'});
+  const cells=host.querySelectorAll('.ts-cell');
+  if(cells.length)motion(cells,{opacity:[0,1],translateY:[5,0],duration:220,delay:stagger(24),ease:'outCubic'});
+  const hot=host.querySelectorAll('.ts-cell.read, .ts-cell.changed');
+  if(hot.length)motion(hot,{scale:[1.24,1],duration:460,delay:stagger(60),ease:'outBack'});
+  const back=host.querySelector('.ts-return');
+  if(back)motion(back,{opacity:[0,1],translateY:[8,0],duration:300,delay:180,ease:'outCubic'});
   const seek=host.querySelector('[data-trace-seek]');
   if(seek)seek.oninput=event=>{clearInterval(traceTimer);traceTimer=null;current.trace.playing=false;traceGoto(Number(event.target.value)-1);};
 }

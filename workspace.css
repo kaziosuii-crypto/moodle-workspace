@@ -171,6 +171,24 @@ input,textarea,select{transition:border-color var(--t-fast) var(--ease),box-shad
 .ai-stream-note{font-size:12px;color:#999;margin:6px 0 0}
 .field-note{font-size:11px;color:#9a9a9a}
 
+
+.ts-stack{display:flex;align-items:center;gap:8px;padding:10px 40px;border-bottom:1px solid #f2f2f2;flex:none;flex-wrap:wrap;min-height:44px}
+.ts-stack-label{font-size:11px;color:#b0b0b0}
+.ts-frame{background:#f5f6f8;border:1px solid #e8e8ea;border-radius:6px;padding:3px 10px;font-family:var(--font-mono);font-size:12px;color:#555}
+.ts-frame.active{background:#e9f4ff;border-color:#b9dcff;color:#1686ef;font-weight:600}
+.ts-arrow{color:#c8c8c8;font-style:normal;margin:0 -2px}
+.ts-return{margin-left:auto;font-family:var(--font-mono);font-size:12px;color:#9c7625;background:#fff8e6;border-radius:6px;padding:3px 10px}
+.ts-array{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.ts-aname{font-family:var(--font-mono);font-size:12px;color:#8c8c8c;min-width:40px}
+.ts-cells{display:flex;gap:4px}
+.ts-cell{display:flex;flex-direction:column;align-items:center;min-width:46px;border:1px solid #e2e2e4;border-radius:6px;overflow:hidden;background:#fff}
+.ts-cell i{font-style:normal;font-size:10px;color:#a8a8a8;background:#fafafa;width:100%;text-align:center;padding:2px 0;font-family:var(--font-mono)}
+.ts-cell b{font-family:var(--font-mono);font-size:14px;font-weight:600;color:#3f3f46;padding:5px 8px}
+.ts-cell.read{background:#eaf4ff;border-color:#8fc4ff;box-shadow:0 0 0 3px #eaf4ff}
+.ts-cell.read b{color:#1686ef}
+.ts-cell.changed{background:#fff4e0;border-color:#f0d29a;box-shadow:0 0 0 3px #fff4e0}
+.ts-cell.changed b{color:#9c7625}
+
 /* ---------------------------------------------------- 逐行执行 · 全屏剧场 */
 .trace-screen{position:absolute;inset:0;z-index:80;background:#fff;display:flex;overflow:hidden}
 .tscreen{flex:1;display:flex;flex-direction:column;min-width:0}
