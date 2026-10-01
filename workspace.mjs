@@ -1044,11 +1044,53 @@ function applyGraphView(){
   g.style.transform='translate('+v.x+'px,'+v.y+'px) scale('+v.zoom+')';
   if(label)label.textContent=Math.round(v.zoom*100)+'%';
 }
-function graphHTML(nodes,prev){
+function graphScreenHTML(){
+  const trace=current.trace,spot=traceSpot();
+  if(!spot)return '';
+  const prev=graphKeys(spot.previous&&spot.previous.nodes);
+  return '<header class="ts-head"><span class="ts-dot"></span><span class="ts-title">数据画板</span>'+
+    '<span class="ts-step">'+esc(traceLabel())+' · '+spot.step.nodes.length+' 个节点</span><span class="grow"></span>'+
+    '<button data-action="trace-play" class="ts-btn">'+(trace.playing?'暂停':'播放')+'</button>'+
+    '<button data-action="trace-prev" class="ts-btn">上一步</button>'+
+    '<button data-action="trace-next" class="ts-btn">下一步</button>'+
+    '<button data-action="graph-close" class="ts-btn">退出</button></header>'+
+    '<div class="ts-graphwrap">'+graphHTML(spot.step.nodes,prev,{})+'</div>';
+}
+function renderGraphScreen(){
+  const host=$('[data-graph-screen]');
+  if(host)host.innerHTML='<section class="gcanvas">'+graphScreenHTML()+'</section>';
+}
+function openGraphScreen(){
+  const trace=current?.trace,spot=traceStop?traceSpot():null;
+  if(!trace||!spot){toast('还没有可查看的节点。');return;}
+  trace.canvas=true;
+  let host=$('[data-graph-screen]');
+  if(!host){host=document.createElement('div');host.className='graph-screen';host.setAttribute('data-graph-screen','');root.append(host);}
+  host.tabIndex=0;
+  host.onkeydown=event=>{
+    const t=current?.trace;if(!t)return;
+    if(event.key==='Escape'){event.preventDefault();closeGraphScreen();}
+    else if(event.key==='ArrowRight'){event.preventDefault();traceGoto((t.cursor||0)+1);}
+    else if(event.key==='ArrowLeft'){event.preventDefault();traceGoto((t.cursor||0)-1);}
+    else if(event.key===' '){event.preventDefault();tracePlay();}
+  };
+  renderGraphScreen();
+  motion(host,{opacity:[0,1],duration:220});
+  setTimeout(()=>host.focus(),30);
+}
+function closeGraphScreen(){
+  if(current?.trace)current.trace.canvas=false;
+  const host=$('[data-graph-screen]');
+  if(host){stopWithin(host);host.remove();}
+  renderTrace();
+}
+function graphHTML(nodes,prev,options){
+  const compact=!!(options&&options.compact);
+  if(compact)nodes=nodes.slice(0,8);
   const W=134,H=60,GX=58,GY=52;
   // Columns come from the available width, not a fixed count.
   const avail=Math.max(340,(window.innerWidth||1200)-96);
-  const cols=Math.max(1,Math.min(6,Math.floor((avail+GX)/(W+GX))));
+  const cols=compact?nodes.length:Math.max(1,Math.min(6,Math.floor((avail+GX)/(W+GX))));
   // Follow the links to recover the shape: a cycle is drawn as a ring, a chain as
   // a snake (so neighbours are always adjacent), anything branching as a grid.
   const byAddr=new Map(nodes.map(n=>[n.addr,n]));
@@ -1059,9 +1101,10 @@ function graphHTML(nodes,prev){
   while(walk&&byAddr.has(walk)&&!seen.has(walk)){seen.add(walk);order.push(byAddr.get(walk));walk=next.get(walk);}
   for(const n of nodes)if(!seen.has(n.addr))order.push(n);
   const cyclic=order.length>2&&next.get(order[order.length-1].addr)===order[0].addr;
+  if(compact)nodes=order;
   const pos=new Map();
   let width,height;
-  if(cyclic){
+  if(cyclic&&!compact){
     const R=Math.max(170,Math.round(order.length*(W*0.62)/Math.PI));
     const cx=R+W/2+10, cy=R+H/2+10;
     order.forEach((n,i)=>{const a=-Math.PI/2+i*2*Math.PI/order.length;pos.set(n.addr,{x:cx+R*Math.cos(a)-W/2,y:cy+R*Math.sin(a)-H/2});});
@@ -1151,7 +1194,8 @@ function renderTraceScreen(){
         '<button data-action="trace-close" class="ts-btn">退出全屏</button>'+
       '</header>'+
       '<div class="ts-stack">'+stackHTML(spot.step.stack,spot.step.returns)+'</div>'+
-      (spot.step.nodes.length?'<div class="ts-graphwrap">'+graphHTML(spot.step.nodes,graphKeys(spot.previous&&spot.previous.nodes))+'</div>':'')+
+      (spot.step.nodes.length?'<div class="ts-graphwrap preview">'+graphHTML(spot.step.nodes,graphKeys(spot.previous&&spot.previous.nodes),{compact:true})+
+        '<button class="ts-canvas-open" data-action="graph-full">打开数据画板 · 共 '+spot.step.nodes.length+' 个节点</button></div>':'')+
       '<div class="ts-body">'+
         '<div class="ts-code">'+traceCodeHTML(spot.step.line,4)+'</div>'+
         '<div class="ts-side">'+
@@ -1232,6 +1276,7 @@ function renderTraceScreen(){
 }
 function renderTrace(){
   const trace=current?.trace;
+  if(trace?.canvas&&trace.status==='ready'&&$('[data-graph-screen]')){renderGraphScreen();return;}
   if(trace?.fullscreen&&trace.status==='ready'&&$('[data-trace-screen]'))return renderTraceScreen();
   const host=$('[data-bottom-body]');
   if(!host)return;
@@ -1680,6 +1725,8 @@ async function handleClick(event) {
     case 'trace-play':return tracePlay();
     case 'trace-stop':return traceStop();
     case 'trace-screen':return traceOpenScreen();
+    case 'graph-full':return openGraphScreen();
+    case 'graph-close':return closeGraphScreen();
     case 'graph-in':case 'graph-out':{
       const view=current?.trace?.view;if(!view)return;
       view.zoom=Math.min(2.5,Math.max(.3,view.zoom*(action==='graph-in'?1.25:.8)));

@@ -191,6 +191,13 @@ input,textarea,select{transition:border-color var(--t-fast) var(--ease),box-shad
 
 
 .ts-graphwrap{flex:none;padding:10px 40px 10px;overflow:hidden;max-height:38vh;border-bottom:1px solid #f2f2f2;cursor:grab;touch-action:none}
+.graph-screen{position:absolute;inset:0;z-index:90;background:#fff;display:flex;overflow:hidden}
+.gcanvas{flex:1;display:flex;flex-direction:column;min-width:0}
+.graph-screen .ts-graphwrap{flex:1;max-height:none;padding:20px 40px}
+.ts-graphwrap.preview{max-height:150px;cursor:default}
+.ts-graphwrap.preview .ts-zoom{display:none}
+.ts-canvas-open{position:absolute;right:40px;top:14px;font-size:12px;padding:6px 12px;background:#eef6ff;color:#1686ef;border-radius:7px;font-weight:600}
+.ts-canvas-open:hover{background:#e2efff}
 .ts-zoom{display:flex;align-items:center;gap:8px;margin-bottom:10px}
 .ts-zoom button{font-size:12px;width:26px;height:24px;padding:0;background:#f5f5f5;color:#666;border-radius:6px}
 .ts-zoom button:hover{background:#ececec;color:#262626}

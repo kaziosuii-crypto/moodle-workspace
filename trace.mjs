@@ -75,7 +75,9 @@ export function declarationsIn(line) {
 
 /** "int a" -> one printable field per name, arrays expanded element by element. */
 function fieldsOf(variable) {
-  if (variable.kind === 'p') return [];
+  // A pointer is a value like any other — it is the (void*) of its address, and
+  // the UI draws it as an arrow to whatever lives there.
+  if (variable.kind === 'p') return [{ label: variable.name, expr: '(void*)' + variable.name, kind: 'p', fmt: '%p' }];
   if (!variable.size) return [{ label: variable.name, expr: variable.name, kind: variable.kind, fmt: variable.fmt }];
   // A char array is one string. Expanding it would print each element with %s,
   // i.e. dereference a char as a pointer.
