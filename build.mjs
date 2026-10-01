@@ -49,6 +49,9 @@ await build({
   target: ['chrome100', 'firefox100'],
   minify: true,
   legalComments: 'inline',
+  // Baked in at build time so the page can show which version is installed;
+  // GM_info is unavailable with @grant none.
+  define: { __SCRIPT_VERSION__: JSON.stringify(pkg.version) },
   banner: { js: header }
 });
 console.log('built code.user.js @ ' + pkg.version);

@@ -249,7 +249,7 @@ function mount() {
         <span class="position" data-position></span>${button('next','','next','square','下一题（Alt + 右方向键）')}
       </div>
       <div class="topgroup actions">${button('run','运行','run','run','运行自定义用例（需要执行 API）')}${button('submit','提交','submit','primary','提交至 Moodle 判题（Ctrl + Enter）')}${button('complete','','ai','purple','AI 补全（Ctrl + I）')}${button('settings','','settings','mobile-settings','设置')}</div>
-      <div class="topgroup end"><span class="muted optional" style="font-size:11px">编程工作区</span><span class="divider optional"></span>${button('settings','','settings','square','编辑器与 AI 设置')}${button('more','','more','square','更多功能')}</div>
+      <div class="topgroup end"><span class="muted optional" title="当前脚本版本" style="font-size:11px">v${__SCRIPT_VERSION__}</span><span class="divider optional"></span>${button('settings','','settings','square','编辑器与 AI 设置')}${button('more','','more','square','更多功能')}</div>
     </header><div class="work-progress hidden" role="progressbar" aria-label="正在处理请求"></div>
     <main class="workspace">
       <section class="panel left">
@@ -1355,7 +1355,7 @@ function openExport() {
 }
 function openMore() {
   const links=[...current.viewDoc.querySelectorAll('a[href]')].filter(a=>/报表|相似度|编程练习|帮助/.test(text(a))).filter((a,i,arr)=>arr.findIndex(b=>text(b)===text(a))===i);
-  openModal(`<header><h2>更多功能</h2><button data-close aria-label="关闭">${icon('close')}</button></header><div class="case-tools">${button('settings','AI 与执行设置','settings')}${button('file','源文件上传','upload')}${button('export','导出工作区','doc')}${button('download','下载代码','code')}${button('original','返回原始页面','doc')}</div><h3 style="margin-top:20px">Moodle 其他功能</h3><p class="hint">以下功能在新标签页打开，不影响当前草稿。</p>${links.map(a=>`<p style="margin:8px 0"><a href="${esc(safeURL(a.getAttribute('href'),base))}" target="_blank" rel="noopener">${esc(text(a))}</a></p>`).join('')}`);
+  openModal(`<header><h2>更多功能 <small class="version-tag">v${__SCRIPT_VERSION__}</small></h2><button data-close aria-label="关闭">${icon('close')}</button></header><div class="case-tools">${button('settings','AI 与执行设置','settings')}${button('file','源文件上传','upload')}${button('export','导出工作区','doc')}${button('download','下载代码','code')}${button('original','返回原始页面','doc')}</div><h3 style="margin-top:20px">Moodle 其他功能</h3><p class="hint">以下功能在新标签页打开，不影响当前草稿。</p>${links.map(a=>`<p style="margin:8px 0"><a href="${esc(safeURL(a.getAttribute('href'),base))}" target="_blank" rel="noopener">${esc(text(a))}</a></p>`).join('')}`);
 }
 async function handleClick(event) {
   const el=event.target.closest('button,[data-result]');if(!el)return;
