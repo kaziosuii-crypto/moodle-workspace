@@ -13,11 +13,11 @@ function deltaOf(payload) {
   return typeof delta === 'string' && delta ? { text: delta } : null;
 }
 
-export async function llm(prompt, {signal, system='', json=false, onDelta=null}={}) {
+export async function llm(prompt, {signal, system='', json=false, onDelta=null, maxTokens=4096, timeoutMs=180000, stop=null}={}) {
   const controller=new AbortController();
   const cancel=()=>controller.abort(signal?.reason);
   if(signal?.aborted)cancel();else signal?.addEventListener('abort',cancel,{once:true});
-  const timer=setTimeout(()=>controller.abort(new DOMException('AI 请求超时，请重试','TimeoutError')),180000);
+  const timer=setTimeout(()=>controller.abort(new DOMException('AI 请求超时，请重试','TimeoutError')),timeoutMs);
   const stream=!!onDelta;
   const key=getKey();
   if(!key)throw new Error('还没有填写 API Key。打开「更多功能 → AI 与执行设置」填入硅基流动密钥即可，填一次长期有效。');
@@ -28,7 +28,8 @@ export async function llm(prompt, {signal, system='', json=false, onDelta=null}=
       body:JSON.stringify({
         model:AI_CONFIG.model,
         messages:[...(system?[{role:'system',content:system}]:[]),{role:'user',content:prompt}],
-        temperature:.2,stream,max_tokens:4096,
+        temperature:.2,stream,max_tokens:maxTokens,
+        ...(stop?{stop}:{}),
         ...(AI_CONFIG.disableThinking?{enable_thinking:false}:{}),
         ...(json?{response_format:{type:'json_object'}}:{})
       }),signal:controller.signal
@@ -77,7 +78,7 @@ export async function llm(prompt, {signal, system='', json=false, onDelta=null}=
     if(typeof answer!=='string' || !answer.trim())throw new Error('模型未返回有效的文字内容。');
     return answer.replace(/^```[^\n]*\n|```\s*$/g,'');
   } catch(error) {
-    if(controller.signal.aborted && !signal?.aborted)throw new Error('AI 请求超过 180 秒，请稍后重试。');
+    if(controller.signal.aborted && !signal?.aborted)throw new Error('AI 请求超过 '+Math.round(timeoutMs/1000)+' 秒，请稍后重试。');
     throw error;
   } finally {clearTimeout(timer);signal?.removeEventListener('abort',cancel);}
 }

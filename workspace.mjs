@@ -3,7 +3,7 @@ import { EditorView, Decoration, WidgetType, keymap, lineNumbers, highlightActiv
 import { defaultKeymap, history as editorHistory, historyKeymap, indentWithTab, indentSelection } from '@codemirror/commands';
 import { cpp } from '@codemirror/lang-cpp';
 import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, indentOnInput, foldGutter, foldKeymap } from '@codemirror/language';
-import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, completeFromList } from '@codemirror/autocomplete';
+import { autocompletion, completionKeymap, completionStatus, closeBrackets, closeBracketsKeymap, completeFromList } from '@codemirror/autocomplete';
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
 import css from './workspace.css';
 import { esc, text, safeURL, ioDisplay, parseProblem, parseNavigation, parseResult } from './adapter.mjs';
@@ -18,6 +18,7 @@ import { instrument, parseTrace, describeStep, viewIndices, changedNames, change
 import { animate, stagger } from 'animejs';
 import { AI_CONFIG } from './ai-config.mjs';
 import { llm } from './ai.mjs';
+import { suggest as aiSuggest, cleanSuggestion } from './copilot.mjs';
 import { TUTOR_SYSTEM, parseTutorResponse, tutorNarrative, tutorPrompt } from './tutor.mjs';
 
 // CodeMirror and every extension share one bundled state/view instance.
@@ -46,7 +47,7 @@ const prefsKey = 'moodle-workspace:v4:settings';
 const read = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } };
 const storedPrefs=read(prefsKey,{});
 dropStoredAnalyses();
-let prefs = {enabled:storedPrefs.aiV5Enabled??true,runner:storedPrefs.runner||''};
+let prefs = {enabled:storedPrefs.aiV5Enabled??true,runner:storedPrefs.runner||'',copilot:storedPrefs.copilot??true};
 function persist(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); return true; }
   catch (error) {
@@ -273,7 +274,7 @@ function mount() {
           <div class="editor-bar"><select data-language aria-label="编译器"></select><span class="muted optional" style="font-size:11px">CodeMirror 6</span><span class="grow"></span>${button('trace','单步','run','','逐行播放这段代码的执行过程')}${button('indent','','list','','重新缩进')}${button('file','','upload','','源文件上传')}${button('clear','','trash','','清空代码')}</div>
           <div class="attachment hidden" data-attachment><span>源文件（优先提交所选文件）</span><span data-file-slot></span>${button('unfile','取消文件','','')}</div>
           <div class="editor-host"><div class="ai-layer hidden" data-ai-layer></div></div>
-          <footer class="foot"><span data-save>已存储</span><span data-cursor>行 1，列 1</span></footer>
+          <footer class="foot"><span data-save>已存储</span><span data-copilot class="foot-ai"></span><span data-cursor>行 1，列 1</span></footer>
         </section>
         <div class="splitter horizontal" data-resize="y" role="separator" tabindex="0" aria-label="调整编辑器高度" aria-orientation="horizontal"></div>
         <section class="panel bottom">
@@ -317,11 +318,116 @@ function mount() {
   });
   setupResize();
 }
+/* -------------------------------------------------------------- AI 内联补全 --
+ * 打字停顿后请求下一小段代码，以灰色幽灵文本贴在光标处。Tab 接受、Esc 丢弃、Alt+i
+ * 立即请求。补全只写进编辑器，不碰任何提交路径；没有密钥或关掉开关时它完全不发请求。
+ */
+const COPILOT_DELAY=520;
+class GhostWidget extends WidgetType {
+  constructor(text){super();this.text=text;}
+  eq(other){return other.text===this.text;}
+  toDOM(){
+    const span=document.createElement('span');
+    span.className='cm-ghost';
+    span.textContent=this.text;
+    span.setAttribute('aria-hidden','true');
+    return span;
+  }
+}
+const ghostEffect=StateEffect.define();
+/** The pending suggestion, or null. Anchored at a document position, never at a range. */
+const ghostField=StateField.define({
+  create:()=>null,
+  update(value,tr){
+    for(const effect of tr.effects)if(effect.is(ghostEffect))return effect.value;
+    // 任何编辑或光标移动都会让它错位，直接丢弃比锚在原地更安全。
+    if(value&&(tr.docChanged||tr.selection))return null;
+    return value;
+  },
+  provide:field=>EditorView.decorations.from(field,ghost=>ghost&&ghost.text
+    ?Decoration.set([Decoration.widget({widget:new GhostWidget(ghost.text),side:1}).range(ghost.pos)])
+    :Decoration.none)
+});
+const copilot={timer:null,controller:null,token:0,suppressUntil:0};
+function copilotEnabled(){return prefs.enabled&&prefs.copilot&&hasKey();}
+function setCopilotState(text){
+  const el=$('[data-copilot]');
+  if(el)el.textContent=text||'';
+  const box=el&&el.closest('.foot');
+  if(box)box.classList.toggle('busy',!!text);
+}
+function setGhost(view,pos,text){
+  const current=view.state.field(ghostField,false);
+  if(!text){if(current)view.dispatch({effects:ghostEffect.of(null)});return;}
+  if(current&&current.pos===pos&&current.text===text)return;
+  view.dispatch({effects:ghostEffect.of({pos,text})});
+}
+function acceptGhost(view){
+  const ghost=view.state.field(ghostField,false);
+  if(!ghost)return false;
+  if(view.state.selection.main.head!==ghost.pos)return false;
+  // 刚插入的内容会触发一次 docChanged，别让它立刻又去问一遍。
+  copilot.suppressUntil=Date.now()+1200;
+  clearTimeout(copilot.timer);copilot.timer=null;
+  view.dispatch({
+    changes:{from:ghost.pos,insert:ghost.text},
+    selection:{anchor:ghost.pos+ghost.text.length},
+    effects:ghostEffect.of(null)
+  });
+  return true;
+}
+function dismissGhost(view){
+  if(!view.state.field(ghostField,false))return false;
+  copilot.suppressUntil=Date.now()+600;
+  clearTimeout(copilot.timer);copilot.timer=null;
+  view.dispatch({effects:ghostEffect.of(null)});
+  return true;
+}
+function scheduleCopilot(view){
+  clearTimeout(copilot.timer);copilot.timer=null;
+  if(!copilotEnabled()||!view.hasFocus)return;
+  // 关键字补全弹窗开着时让位给它，两套补全不要同时糊在光标上。
+  if(completionStatus(view.state)==='active')return;
+  const selection=view.state.selection.main;
+  if(!selection.empty)return;
+  const pos=selection.head;
+  // 刚按下 Tab/Esc 之后的静默期只是推迟，不是取消 —— 否则接着打字那一整段都不再补全，
+  // 要停下来再敲一下才恢复。
+  const wait=Math.max(COPILOT_DELAY,copilot.suppressUntil-Date.now()+40);
+  copilot.timer=setTimeout(()=>{copilot.timer=null;runCopilot(view,pos).catch(()=>{});},wait);
+}
+async function runCopilot(view,pos){
+  if(!copilotEnabled()||view.state.selection.main.head!==pos||!view.hasFocus)return;
+  const doc=view.state.doc,text=doc.toString();
+  const prefix=text.slice(0,pos);
+  if(!prefix.trim())return;
+  copilot.controller?.abort();
+  const controller=new AbortController();
+  copilot.controller=controller;
+  const token=++copilot.token;
+  setCopilotState('AI 补全中…');
+  // 只有文档和光标都还停在原地时，结果才允许落到编辑器里。
+  const stillValid=()=>token===copilot.token&&view.state.doc===doc&&view.state.selection.main.head===pos;
+  try{
+    const answer=await aiSuggest({
+      prefix,suffix:text.slice(pos),statement:current?.problem?.statement||'',signal:controller.signal,
+      onDelta:(delta,full)=>{
+        if(!stillValid())return;
+        const partial=cleanSuggestion(full,prefix,text.slice(pos));
+        if(partial)setGhost(view,pos,partial);
+      }
+    });
+    if(!stillValid())return;
+    setGhost(view,pos,answer);
+  }finally{
+    if(token===copilot.token){copilot.controller=null;setCopilotState('');}
+  }
+}
 function editorState(value) {
   const words=['int','char','float','double','long','unsigned','void','return','if','else','for','while','break','continue','struct','typedef','sizeof','const','switch','case','printf','scanf','malloc','free','strlen','main'];
   return EditorState.create({ doc:value, extensions:[
     lineNumbers(),highlightActiveLine(),highlightActiveLineGutter(),drawSelection(),editorHistory(),cpp(),
-    diagnosisField,
+    diagnosisField,ghostField,
     syntaxHighlighting(defaultHighlightStyle),indentOnInput(),bracketMatching(),closeBrackets(),foldGutter(),
     highlightSelectionMatches(),EditorView.lineWrapping,
     autocompletion({ override:[completeFromList(words.map(label=>({label,type:['printf','scanf','strlen','main'].includes(label)?'function':'keyword'})))] }),
@@ -329,8 +435,19 @@ function editorState(value) {
       {key:'Mod-Enter',run:()=>{submit().catch(e=>toast(e.message));return true;}},
       {key:'Mod-i',run:()=>{complete().catch(e=>toast(e.message));return true;}},
       {key:'Mod-s',run:()=>{saveDraft();toast('草稿已保存');return true;}},
+      // 幽灵文本要排在 completionKeymap 和 indentWithTab 前面，否则 Tab 会被它们先吃掉；
+      // 补全弹窗开着时让给弹窗，两套补全才不会互相打架。
+      {key:'Tab',run:view=>completionStatus(view.state)==='active'?false:acceptGhost(view)},
+      {key:'Escape',run:view=>dismissGhost(view)},
+      {key:'Alt-i',run:view=>{
+        if(!copilotEnabled()){aiReady();return true;}
+        runCopilot(view,view.state.selection.main.head).catch(error=>toast(error.message));
+        return true;
+      }},
       ...closeBracketsKeymap,...defaultKeymap,...historyKeymap,...completionKeymap,...searchKeymap,...foldKeymap,indentWithTab
     ]),
+    // 点到别处时补全就不该还挂在编辑器里。
+    EditorView.domEventHandlers({blur:(event,view)=>{dismissGhost(view);return false;}}),
     EditorView.updateListener.of(update=>{
       if (update.docChanged) {
         clearTimeout(saveTimer); saveDraft();
@@ -338,6 +455,7 @@ function editorState(value) {
           const warning=$('[data-tutor-stale]');if(warning)warning.classList.remove('hidden');
           $$('[data-ai-line]').forEach(b=>b.disabled=true);
         }
+        scheduleCopilot(update.view);
       }
       if (update.docChanged || update.selectionSet) {
         const pos=update.state.selection.main.head,line=update.state.doc.lineAt(pos);
@@ -541,12 +659,14 @@ function openSettings(focusKey) {
     <label class="field">固定模型<input data-model readonly value="${esc(AI_CONFIG.model)}"></label>
     <label class="field">API Key<input data-key type="password" placeholder="sk-…" autocomplete="off" spellcheck="false" aria-label="硅基流动 API Key"><span class="field-note" data-key-state></span></label>
     <label class="check"><input data-enabled type="checkbox">启用 AI 辅导、补全与用例生成</label>
+    <label class="check"><input data-copilot type="checkbox">打字停顿后自动内联补全（灰色预览，Tab 接受 / Esc 丢弃 / Alt+i 立即补一次）</label>
     <p class="hint">在 <a href="https://cloud.siliconflow.cn/account/ak" target="_blank" rel="noopener">硅基流动控制台</a> 建一个密钥粘到这里即可。密钥只写进这台浏览器的 localStorage，<strong>脚本更新后依然保留</strong>，不会上传到任何地方。点击 AI 功能时才会把题干、代码、用例与判题详情发送给硅基流动。所有 AI 功能使用同一固定模型，不会静默切换。</p>
     <label class="field">自定义用例执行 API（留空则使用内置在线编译器）<input data-runner type="url" placeholder="留空 = 内置在线编译器；或填写 https://…/run"></label>
     <details class="hint"><summary>执行 API 数据格式</summary><p>请求：{ code, language, tests: [{input, expected}] }<br>响应：{ results: [{ stdout, stderr, time, memory }] }。端点必须支持 CORS。</p></details>
     <div class="hint" data-connection role="status"></div><footer><button data-test-connection>测试连接</button><button data-save-settings class="primary">保存设置</button></footer>`);
   m.querySelector('[data-runner]').value=prefs.runner;
   m.querySelector('[data-enabled]').checked=prefs.enabled;
+  m.querySelector('[data-copilot]').checked=prefs.copilot;
   m.querySelector('[data-key]').value=getKey();
   const keyState=m.querySelector('[data-key-state]');
   const paintKeyState=()=>{
@@ -555,12 +675,12 @@ function openSettings(focusKey) {
   };
   paintKeyState();
   m.querySelector('[data-key]').addEventListener('input',paintKeyState);
-  const values=()=>({enabled:m.querySelector('[data-enabled]').checked,runner:m.querySelector('[data-runner]').value.trim()});
+  const values=()=>({enabled:m.querySelector('[data-enabled]').checked,copilot:m.querySelector('[data-copilot]').checked,runner:m.querySelector('[data-runner]').value.trim()});
   m.querySelector('[data-save-settings]').onclick=()=>{
     try {
       const next=values();validateSettings(next);
       setKey(m.querySelector('[data-key]').value);
-      prefs=next;persist(prefsKey,{aiV5Enabled:prefs.enabled,runner:prefs.runner});closeModal();toast(hasKey()?'设置已保存，密钥已缓存到本机':'设置已保存');
+      prefs=next;persist(prefsKey,{aiV5Enabled:prefs.enabled,runner:prefs.runner,copilot:prefs.copilot});closeModal();toast(hasKey()?'设置已保存，密钥已缓存到本机':'设置已保存');
     } catch(e) { m.querySelector('[data-connection]').textContent=e.message; }
   };
   if(focusKey||missing)m.querySelector('[data-key]').focus();

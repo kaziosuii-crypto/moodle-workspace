@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
 import { readFileSync } from 'node:fs';
+import { cleanSuggestion, copilotPrompt } from './copilot.mjs';
 import { ioText, richContent, formatTime, parseProblem, parseNavigation, parseResult, safeURL } from './adapter.mjs';
 import { parseTutorResponse, tutorNarrative, tutorPrompt } from './tutor.mjs';
 const base='http://example.test/moodle/mod/programming/view.php?a=117';
@@ -75,6 +76,25 @@ test('tutor prompt keeps test inputs expected outputs and submission evidence',(
   assert.ok(prompt.includes(JSON.stringify(context)));
   assert.match(prompt,/诊断错误/);
   assert.match(prompt,/why\?/);
+});
+
+const FENCE=String.fromCharCode(96).repeat(3);
+test('内联补全会剥掉代码围栏，并去掉模型重复的那一行',()=>{
+  assert.equal(
+    cleanSuggestion(FENCE+'c\nfor (int i=0;i<n;i++) {\n    sum += i;\n}\n'+FENCE,'    for (int i=0;i<n;i++) {','\n    return 0;\n}'),
+    '\n    sum += i;\n}'
+  );
+  // 光标后已有代码时，模型有时会把它也抄一遍，插入就等于重复。
+  assert.equal(cleanSuggestion('    sum += i;\n}','    for (int i=0;i<n;i++) {',''),'    sum += i;\n}');
+  // 只补半个标识符：已经打出来的部分不能再补一遍。
+  assert.equal(cleanSuggestion('int x = 0;','    in',''),'t x = 0;');
+  assert.equal(cleanSuggestion('  \n  ','int a;',''),'');
+});
+test('内联补全的提示带着题干、光标前后的代码和一个明确的光标位',()=>{
+  const prompt=copilotPrompt({prefix:'int main(void) {\n    int sum = 0;\n',suffix:'\n    return 0;\n}',statement:'读入 n 个数求和'});
+  assert.match(prompt,/读入 n 个数求和/);
+  assert.ok(prompt.includes('int sum = 0;\n<CURSOR>'),'光标必须落在代码中间');
+  assert.ok(prompt.includes('return 0;'),'光标之后的代码也要给模型看，否则会写出重复的块');
 });
 
 test('逐行执行的上一步/下一步读的是真实存在的游标字段',()=>{

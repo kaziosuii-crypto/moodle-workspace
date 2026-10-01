@@ -57,6 +57,13 @@ a{color:#1683d8;text-decoration:none}a:hover{text-decoration:underline}h1,h2,h3,
 
 /* Per-line AI diagnosis: an overlay layer that never enters the editable document. */
 .editor-host{position:relative;flex:1;min-height:0;display:flex;flex-direction:column}
+/* AI 内联补全：贴在光标后的灰字。多行时按原样换行，缩进由文本自己带。 */
+.cm-ghost{color:#b4b8bf;white-space:pre-wrap;font-style:normal;pointer-events:none}
+.cm-ghost:after{content:'';display:inline-block;width:1px;height:1em;margin-left:1px;
+  background:#c9ccd2;vertical-align:-.15em;animation:ws-caret 1.1s steps(2,start) infinite}
+.foot-ai{color:#1686ef}
+.foot-ai:empty{display:none}
+@keyframes ws-caret{0%,50%{opacity:1}50.01%,100%{opacity:0}}
 .ai-layer{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:5}
 .ai-layer.hidden{display:none}
 .ai-chip{position:absolute;left:10px;pointer-events:auto;max-width:calc(100% - 20px);display:inline-flex;align-items:center;text-align:left;background:#fff;border:1px solid #e3e3e3;border-left:3px solid #2563eb;border-radius:4px;padding:2px 9px;font-size:11px;font-weight:600;color:#1d4ed8;box-shadow:0 1px 4px #0000001a}
