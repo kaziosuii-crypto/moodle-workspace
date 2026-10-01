@@ -14,6 +14,8 @@ const CASES = {
   // printf 不带换行时，下一个 marker 会落在同一行。按整行处理就会把 marker 当成
   // 程序自己的输出打印出来（"数组元素：__WS_STEP__78|..."）。
   // 跨行初始化列表：marker 不能插进 {...} 里面，否则插桩后的源码直接编译不过。
+  // 字符串里带换行：marker 那一行会被真换行劈开，后半截会漏成程序自己的输出。
+  'string containing a newline': ['int main(void) {', '    const char *msg[3] = {"a\\nb", "c|d", "e"};', '    printf("%s", msg[0]);', '    printf("%s", msg[1]);', '    printf("%s\\n", msg[2]);', '    return 0;', '}'],
   'multi-line initialiser': ['#include <stdlib.h>', 'int main(void) {', '    const char *w[][3] = {', '    {"春", "3", "4"},', '    {"夏", "6", "7"},', '    {"秋", "9", "10"}', '    };', '    int n = sizeof(w) / sizeof(w[0]);', '    int m = atoi(w[1][1]);', '    printf("%d %d %s\\n", n, m, w[0][0]);', '    return 0;', '}'],
   'printf without a trailing newline': ['int main(void) {', '    printf("a");', '    int x = 1;', '    printf("b");', '    printf("%d\\n", x);', '    return 0;', '}'],
   'allman-style heads': ['static void show(int n)', '{', '    printf("%d\\n", n);', '}', 'int main(void)', '{', '    int i = 0;', '    for (i = 0; i < 3; i++)', '    {', '        show(i);', '    }', '    return 0;', '}'],

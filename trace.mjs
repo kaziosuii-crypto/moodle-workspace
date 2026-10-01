@@ -158,16 +158,16 @@ function fieldsOf(variable) {
   // A char array is one string. Expanding it would print each element with %s,
   // i.e. dereference a char as a pointer.
   if (dims.length === 1 && variable.kind === 's' && !variable.pointer) {
-    return [{ label: variable.name, expr: variable.name, kind: 's', fmt: '%.40s' }];
+    return [{ label: variable.name, expr: '__ws_esc(' + variable.name + ')', kind: 's', fmt: '%s' }];
   }
   const fields = [];
   const walk = (suffix, depth) => {
     if (depth === dims.length) {
       const ref = variable.name + suffix;
-      // A char* element may be NULL, and %s on NULL is undefined - glibc prints "(null)",
-      // other runtimes crash - so the expression guards it.
+      // __ws_esc does two jobs: it protects %s from a NULL element, and it keeps a
+      // newline or a '|' inside the text from splitting the marker line in half.
       fields.push(variable.kind === 's'
-        ? { label: ref, expr: '(' + ref + ' ? ' + ref + ' : "(null)")', kind: 's', fmt: '%.40s' }
+        ? { label: ref, expr: '__ws_esc(' + ref + ')', kind: 's', fmt: '%s' }
         : { label: ref, expr: ref, kind: variable.kind, fmt: variable.fmt });
       return;
     }
@@ -276,7 +276,7 @@ function walkerSource(structs) {
     out += '  printf("__WS_NODE__' + name + '|%p", (void*)__ws_p);\n';
     for (const f of def.fields) {
       if (f.kind === 'p') out += '  printf("|p:' + f.name + '=%p", (void*)__ws_p->' + f.name + ');\n';
-      else if (f.kind === 's') out += '  printf("|s:' + f.name + '=%.24s", __ws_p->' + f.name + ');\n';
+      else if (f.kind === 's') out += '  printf("|s:' + f.name + '=%s", __ws_esc(__ws_p->' + f.name + '));\n';
       else out += '  printf("|' + f.kind + ':' + f.name + '=' + f.fmt + '", __ws_p->' + f.name + ');\n';
     }
     out += '  printf("\\n");\n';
@@ -531,7 +531,32 @@ export function instrument(source) {
   // The walker bodies dereference struct fields, so they go after the user's
   // struct definitions; the prototypes only need a forward declaration.
   const names = [...walkable];
+  const body = out.join('\n');
+  const walkers = walkerSource(structs);
+  // A string can contain a newline, and a marker line cut in half by one spills its tail
+  // into the program's own output. The escape helper goes in only when something prints a
+  // string, so an unused static function never trips -Wall on a program that has none.
+  const escapeHelper = body.includes('__ws_esc(') || walkers.includes('__ws_esc(') ? [
+  "static char __ws_eb[32][96];",
+  "static int __ws_en=0;",
+  "static const char* __ws_esc(const char* __ws_s){",
+  "  char* __ws_b=__ws_eb[__ws_en++&31];",
+  "  int __ws_i=0,__ws_o=0;",
+  "  if(!__ws_s)__ws_s=\"(null)\";",
+  "  while(__ws_s[__ws_i]&&__ws_i<40&&__ws_o<94){",
+  "    unsigned char __ws_c=(unsigned char)__ws_s[__ws_i++];",
+  "    if(__ws_c=='\\n'){__ws_b[__ws_o++]='\\\\';__ws_b[__ws_o++]='n';}",
+  "    else if(__ws_c=='\\r'){__ws_b[__ws_o++]='\\\\';__ws_b[__ws_o++]='r';}",
+  "    else if(__ws_c=='|'){__ws_b[__ws_o++]='\\\\';__ws_b[__ws_o++]='p';}",
+  "    else if(__ws_c=='\\\\'){__ws_b[__ws_o++]='\\\\';__ws_b[__ws_o++]='\\\\';}",
+  "    else __ws_b[__ws_o++]=(char)__ws_c;",
+  "  }",
+  "  __ws_b[__ws_o]=0;",
+  "  return __ws_b;",
+  "}"
+  ] : [];
   const helpers = [
+  ...escapeHelper,
     'static void* __ws_known[1024];',
     'static int __ws_known_n=0;',
     'static void __ws_known_add(void* __ws_p){int __ws_i;if(!__ws_p)return;for(__ws_i=0;__ws_i<__ws_known_n;__ws_i++)if(__ws_known[__ws_i]==__ws_p)return;if(__ws_known_n<1024)__ws_known[__ws_known_n++]=__ws_p;}',
@@ -541,15 +566,29 @@ export function instrument(source) {
   ].join('\n');
   const prologue = names.map(n => 'struct ' + n + ';').join('\n') + '\n' + helpers + '\n' +
     names.map(n => 'static void __ws_walk_' + n + '(struct ' + n + '*, int);').join('\n');
-  return { source: '#include <stdio.h>\nstatic int __ws_steps=0;\n' + prologue + '\n' + out.join('\n') + '\n' + walkerSource(structs), count };
+  return { source: '#include <stdio.h>\nstatic int __ws_steps=0;\n' + prologue + '\n' + body + '\n' + walkers, count };
 }
 
 /** Split program output into replayed steps (line, live variables, output so far). */
+/**
+ * Undo the marker escapes. "\\n" is deliberately left as text: that is how the C source
+ * wrote it, and it reads better in a chip than a real newline would.
+ */
+function unescapeField(value) {
+  if (!value.includes('\\')) return value;
+  let out = '';
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] !== '\\') { out += value[i]; continue; }
+    const next = value[++i];
+    out += next === '\\' ? '\\' : next === 'p' ? '|' : '\\' + (next ?? '');
+  }
+  return out;
+}
 /** "i:n=3" -> { name:'n', kind:'i', value:'3' } */
 function parseField(field) {
   const split = field.indexOf('=');
   if (split < 0) return null;
-  const key = field.slice(0, split), value = field.slice(split + 1);
+  const key = field.slice(0, split), value = unescapeField(field.slice(split + 1));
   const colon = key.indexOf(':');
   return { name: colon < 0 ? key : key.slice(colon + 1), kind: colon < 0 ? 'i' : key.slice(0, colon), value };
 }
