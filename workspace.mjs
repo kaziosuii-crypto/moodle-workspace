@@ -1027,7 +1027,24 @@ function arrayHTML(name,cells,reads,changed){
  * nodes this step actually captured, so a garbage or dangling pointer shows as a
  * stub instead of a line to nowhere.
  */
-function graphHTML(nodes){
+/** Addresses and links of a step, used to tell what actually changed. */
+function graphKeys(nodes){
+  const addrs=new Set(),edges=new Set();
+  for(const n of nodes||[]){
+    addrs.add(n.addr);
+    for(const f of n.fields)if(f.kind==='p')edges.add(n.addr+'|'+f.name+'|'+f.value);
+  }
+  return{addrs,edges};
+}
+/** Re-apply the saved zoom / pan to the graph. */
+function applyGraphView(){
+  const v=current?.trace?.view,g=$('.ts-graph'),label=$('.ts-zoom span');
+  if(!g||!v)return;
+  g.style.transformOrigin='0 0';
+  g.style.transform='translate('+v.x+'px,'+v.y+'px) scale('+v.zoom+')';
+  if(label)label.textContent=Math.round(v.zoom*100)+'%';
+}
+function graphHTML(nodes,prev){
   const W=134,H=60,GX=58,GY=52,cols=Math.min(4,Math.max(1,nodes.length));
   const pos=new Map();
   nodes.forEach((n,i)=>pos.set(n.addr,{x:(i%cols)*(W+GX)+2,y:Math.floor(i/cols)*(H+GY)+2}));
@@ -1036,24 +1053,26 @@ function graphHTML(nodes){
   let boxes='',edges='';
   for(const n of nodes){
     const p=pos.get(n.addr);
-    boxes+='<div class="ts-node" style="left:'+p.x+'px;top:'+p.y+'px;width:'+W+'px;height:'+H+'px">'+
+    boxes+='<div class="ts-node'+(prev.addrs.has(n.addr)?'':' new')+'" style="left:'+p.x+'px;top:'+p.y+'px;width:'+W+'px;height:'+H+'px">'+
       '<span class="ts-ntype">'+esc(n.type)+'</span><span class="ts-naddr">'+esc(String(n.addr).slice(-5))+'</span>'+
       n.fields.filter(f=>f.kind!=='p').map(f=>'<span class="ts-nf"><i>'+esc(f.name)+'</i><b>'+esc(f.value)+'</b></span>').join('')+
       '</div>';
     for(const f of n.fields.filter(x=>x.kind==='p')){
       const to=pos.get(f.value);
       const sx=p.x+W, sy=p.y+H/2;
-      if(!to){ edges+='<path class="ts-edge dangling" d="M'+sx+' '+sy+' h20"/>'; continue; }
+      const fresh=prev.edges.has(n.addr+'|'+f.name+'|'+f.value)?'':' new';
+      if(!to){ edges+='<path class="ts-edge dangling'+fresh+'" d="M'+sx+' '+sy+' h20"/>'; continue; }
       const tx=to.x, ty=to.y+H/2;
       if(tx>sx){
-        edges+='<path class="ts-edge" marker-end="url(#ts-head)" d="M'+sx+' '+sy+' C'+(sx+22)+' '+sy+' '+(tx-22)+' '+ty+' '+tx+' '+ty+'"/>';
+        edges+='<path class="ts-edge'+fresh+'" marker-end="url(#ts-head)" d="M'+sx+' '+sy+' C'+(sx+22)+' '+sy+' '+(tx-22)+' '+ty+' '+tx+' '+ty+'"/>';
       }else{
         const by=Math.max(p.y,to.y)+H+20;
-        edges+='<path class="ts-edge back" marker-end="url(#ts-head)" d="M'+(p.x+W/2)+' '+(p.y+H)+' C'+(p.x+W/2)+' '+by+' '+(to.x+W/2)+' '+by+' '+(to.x+W/2)+' '+(to.y+H)+'"/>';
+        edges+='<path class="ts-edge back'+fresh+'" marker-end="url(#ts-head)" d="M'+(p.x+W/2)+' '+(p.y+H)+' C'+(p.x+W/2)+' '+by+' '+(to.x+W/2)+' '+by+' '+(to.x+W/2)+' '+(to.y+H)+'"/>';
       }
     }
   }
-  return '<div class="ts-graph" style="width:'+width+'px;height:'+(height+30)+'px">'+
+  return '<div class="ts-zoom"><button data-action="graph-out">−</button><span>100%</span><button data-action="graph-in">+</button><button data-action="graph-fit">适应</button><span class="ts-zoom-hint">滚轮缩放 · 拖动平移</span></div>'+
+    '<div class="ts-graph" style="width:'+width+'px;height:'+(height+30)+'px">'+
     '<svg class="ts-edges" width="'+(width+60)+'" height="'+(height+40)+'" style="overflow:visible">'+
     '<defs><marker id="ts-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">'+
     '<path d="M0 0 L10 5 L0 10 z" fill="#1686ef"/></marker>'+
@@ -1090,6 +1109,7 @@ function renderTraceScreen(){
   const spot=traceSpot();
   if(!spot)return traceCloseScreen();
   const trace=current.trace,changes=changedValues(spot.previous,spot.step);
+  if(!trace.view)trace.view={zoom:1,x:0,y:0};
   const changedSet=new Set(changes.map(c=>c.name)),grouped=groupVars(spot.step.vars);
   const changeOf=name=>changes.find(c=>c.name===name);
   host.innerHTML='<section class="tscreen">'+
@@ -1104,7 +1124,7 @@ function renderTraceScreen(){
         '<button data-action="trace-close" class="ts-btn">退出全屏</button>'+
       '</header>'+
       '<div class="ts-stack">'+stackHTML(spot.step.stack,spot.step.returns)+'</div>'+
-      (spot.step.nodes.length?'<div class="ts-graphwrap">'+graphHTML(spot.step.nodes)+'</div>':'')+
+      (spot.step.nodes.length?'<div class="ts-graphwrap">'+graphHTML(spot.step.nodes,graphKeys(spot.previous&&spot.previous.nodes))+'</div>':'')+
       '<div class="ts-body">'+
         '<div class="ts-code">'+traceCodeHTML(spot.step.line,4)+'</div>'+
         '<div class="ts-side">'+
@@ -1126,8 +1146,7 @@ function renderTraceScreen(){
     '</section>';
   // The chips that actually changed are the ones worth looking at, so they land
   // last and pop.
-  const vars=host.querySelectorAll('.trace-var');
-  motion(vars,{opacity:[0,1],translateY:[6,0],duration:240,delay:stagger(28),ease:'outCubic'});
+  // Unchanged values stay perfectly still, so the eye only follows what moved.
   // Value reel: the old number lifts away while the new one rises in.
   host.querySelectorAll('.reel-old').forEach(old=>{
     motion(old,{translateY:[-15],opacity:[1,0],duration:190,ease:'inCubic',onComplete:()=>old.remove()});
@@ -1147,16 +1166,40 @@ function renderTraceScreen(){
   if(hot.length)motion(hot,{scale:[1.24,1],duration:460,delay:stagger(60),ease:'outBack'});
   const back=host.querySelector('.ts-return');
   if(back)motion(back,{opacity:[0,1],translateY:[8,0],duration:300,delay:180,ease:'outCubic'});
-  // Nodes land in sequence, then each arrow draws itself towards its target.
-  const nodesEl=host.querySelectorAll('.ts-node');
-  if(nodesEl.length)motion(nodesEl,{opacity:[0,1],translateY:[10,0],duration:300,delay:stagger(55),ease:'outCubic'});
-  host.querySelectorAll('.ts-edge').forEach(path=>{
+  // Only what appeared this step animates; edges that were already there keep
+  // still instead of redrawing themselves on every single step.
+  const freshNodes=host.querySelectorAll('.ts-node.new');
+  if(freshNodes.length)motion(freshNodes,{opacity:[0,1],translateY:[10,0],duration:300,delay:stagger(55),ease:'outCubic'});
+  host.querySelectorAll('.ts-edge.new').forEach(path=>{
     let len=0;
     try{ len=path.getTotalLength(); }catch{ return; }
     if(!len)return;
     path.style.strokeDasharray=len; path.style.strokeDashoffset=len;
-    motion(path,{strokeDashoffset:[len,0],duration:460,delay:260,ease:'outCubic'});
+    motion(path,{strokeDashoffset:[len,0],duration:460,delay:280,ease:'outCubic'});
   });
+  const wrap=host.querySelector('.ts-graphwrap');
+  if(wrap){
+    applyGraphView();
+    let drag=null;
+    wrap.addEventListener('wheel',event=>{
+      event.preventDefault();
+      const view=current.trace.view;
+      view.zoom=Math.min(2.5,Math.max(.3,view.zoom*(event.deltaY<0?1.12:.89)));
+      applyGraphView();
+    },{passive:false});
+    wrap.addEventListener('pointerdown',event=>{
+      if(event.target.closest('button'))return;
+      drag={x:event.clientX,y:event.clientY,ox:current.trace.view.x,oy:current.trace.view.y};
+      try{ wrap.setPointerCapture(event.pointerId); }catch{}
+    });
+    wrap.addEventListener('pointermove',event=>{
+      if(!drag)return;
+      const view=current.trace.view;
+      view.x=drag.ox+(event.clientX-drag.x);view.y=drag.oy+(event.clientY-drag.y);
+      applyGraphView();
+    });
+    wrap.addEventListener('pointerup',()=>{drag=null;});
+  }
   const seek=host.querySelector('[data-trace-seek]');
   if(seek)seek.oninput=event=>{clearInterval(traceTimer);traceTimer=null;current.trace.playing=false;traceGoto(Number(event.target.value)-1);};
 }
@@ -1592,7 +1635,8 @@ async function handleClick(event) {
     if(current.id===id && $('[data-history-code]'))$('[data-history-code]').innerHTML=`<h3 style="margin-top:18px">历史代码（只读）</h3><pre class="history-code">${esc(doc.querySelector('#codeview textarea')?.value || '无代码内容')}</pre>`;
     return;
   }
-  switch(el.dataset.action){
+  const action=el.dataset.action;
+  switch(action){
     case 'problems':return openProblems();
     case 'prev':return navigateOffset(-1);
     case 'next':return navigateOffset(1);
@@ -1609,6 +1653,12 @@ async function handleClick(event) {
     case 'trace-play':return tracePlay();
     case 'trace-stop':return traceStop();
     case 'trace-screen':return traceOpenScreen();
+    case 'graph-in':case 'graph-out':{
+      const view=current?.trace?.view;if(!view)return;
+      view.zoom=Math.min(2.5,Math.max(.3,view.zoom*(action==='graph-in'?1.25:.8)));
+      return applyGraphView();
+    }
+    case 'graph-fit':{const view=current?.trace?.view;if(!view)return;view.zoom=1;view.x=0;view.y=0;return applyGraphView();}
     case 'trace-close':return traceCloseScreen();
     case 'trace-mode':{
       const t=current?.trace;if(!t)return;

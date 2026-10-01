@@ -190,7 +190,13 @@ input,textarea,select{transition:border-color var(--t-fast) var(--ease),box-shad
 .ts-cell.changed b{color:#9c7625}
 
 
-.ts-graphwrap{flex:none;padding:16px 40px 10px;overflow:auto;max-height:34vh;border-bottom:1px solid #f2f2f2}
+.ts-graphwrap{flex:none;padding:10px 40px 10px;overflow:hidden;max-height:38vh;border-bottom:1px solid #f2f2f2;cursor:grab;touch-action:none}
+.ts-zoom{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.ts-zoom button{font-size:12px;width:26px;height:24px;padding:0;background:#f5f5f5;color:#666;border-radius:6px}
+.ts-zoom button:hover{background:#ececec;color:#262626}
+.ts-zoom button[data-action=graph-fit]{width:auto;padding:0 10px}
+.ts-zoom span{font-size:11px;color:#8c8c8c;font-variant-numeric:tabular-nums;min-width:38px;text-align:center}
+.ts-zoom-hint{font-size:10px;color:#c0c0c0;margin-left:4px}
 .ts-graph{position:relative}
 .ts-edges{position:absolute;left:0;top:0;pointer-events:none}
 .ts-edge{fill:none;stroke:#1686ef;stroke-width:1.6}
