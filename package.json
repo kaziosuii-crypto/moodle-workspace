@@ -1,7 +1,7 @@
 {
   "name": "moodle-workspace",
   "private": true,
-  "version": "6.0.33",
+  "version": "6.0.34",
   "scripts": {
     "build": "node build.mjs",
     "test": "node --test tests.mjs",
@@ -17,6 +17,8 @@
     "@codemirror/state": "6.5.2",
     "@codemirror/view": "6.36.5",
     "animejs": "^4.5.0",
+    "cytoscape": "^3.34.3",
+    "cytoscape-klay": "^3.1.4",
     "dagre": "^0.8.5"
   },
   "devDependencies": {

@@ -11,6 +11,9 @@ import { parseCompileIssues, diffBlock, describeDiff } from './diagnostics.mjs';
 import { SANDBOX_SOURCE } from './sandbox.mjs';
 import { getKey, setKey, hasKey, maskKey } from './ai-key.mjs';
 import dagre from 'dagre';
+import cytoscape from 'cytoscape';
+import klayLayout from 'cytoscape-klay';
+cytoscape.use(klayLayout);
 import { instrument, parseTrace, describeStep, viewIndices, changedNames, changedValues } from './trace.mjs';
 import { animate, stagger } from 'animejs';
 import { AI_CONFIG } from './ai-config.mjs';
@@ -1095,6 +1098,75 @@ function fitGraph(){
   applyGraphView();
   return true;
 }
+/**
+ * Data canvas, drawn by Cytoscape with the KLay layout.
+ *
+ * KLay routes edges around nodes instead of straight through them, and Cytoscape
+ * brings pan, zoom and fit for free — the hand-written SVG layout and navigation
+ * this replaces could do neither.
+ */
+let cyView=null,cyHost=null;
+const CY_STYLE=[
+  {selector:'node',style:{'background-color':'#fff','border-width':1,'border-color':'#d9dee6',
+    'shape':'round-rectangle','width':142,'height':62,'label':'data(label)','font-size':11,
+    'font-family':'Consolas, "Cascadia Code", monospace','color':'#3f3f46','text-wrap':'wrap',
+    'text-max-width':130,'text-valign':'center','text-halign':'center','padding':6}},
+  {selector:'node[kind="ptr"]',style:{'background-color':'#eef6ff','border-color':'#b9dcff','color':'#1686ef',
+    'width':92,'height':30,'font-size':12,'font-weight':'bold'}},
+  {selector:'node[kind="ptr"][moved="1"]',style:{'background-color':'#fff4e0','border-color':'#f0d29b','color':'#9c7625'}},
+  {selector:'edge',style:{'width':1.6,'line-color':'#1686ef','target-arrow-color':'#1686ef',
+    'target-arrow-shape':'triangle','curve-style':'bezier','arrow-scale':.85,'font-size':10,
+    'font-family':'Consolas, monospace','color':'#9aa0a6','text-background-color':'#fff','text-background-opacity':.85,'text-background-padding':2}},
+  {selector:'edge[kind="ptr"]',style:{'line-color':'#7fb3e8','target-arrow-color':'#7fb3e8','line-style':'solid'}},
+  {selector:'edge[kind="read"]',style:{'line-color':'#e0a94a','target-arrow-color':'#e0a94a','width':2}},
+  {selector:'.fresh',style:{'opacity':.05}}
+];
+function cyElements(spot){
+  const live=new Set(spot.step.nodes.map(n=>n.addr));
+  const nodes=[],edges=[];
+  for(const n of spot.step.nodes){
+    const lines=[n.type+'  '+String(n.addr).slice(-5)];
+    for(const f of n.fields){
+      if(f.kind==='p'){ lines.push(f.name+' -> '+(live.has(f.value)?String(f.value).slice(-5):(f.value==='0x0'?'NULL':'?'))); }
+      else lines.push(f.name+' = '+f.value);
+    }
+    nodes.push({data:{id:'n:'+n.addr,kind:'node',label:lines.join('\n')}});
+    for(const f of n.fields){
+      if(f.kind!=='p'||!live.has(f.value))continue;
+      edges.push({data:{id:'e:'+n.addr+':'+f.name,source:'n:'+n.addr,target:'n:'+f.value,label:f.name}});
+    }
+  }
+  const prev=new Map(((spot.previous&&spot.previous.vars)||[]).map(v=>[v.name,v.value]));
+  for(const v of (spot.step.vars||[])){
+    if(v.kind!=='p')continue;
+    const id='p:'+v.name;
+    nodes.push({data:{id,kind:'ptr',label:v.name,moved:prev.get(v.name)!==v.value?'1':'0'}});
+    if(live.has(v.value))edges.push({data:{id:'e:'+id,source:id,target:'n:'+v.value,kind:'ptr'}});
+  }
+  return [...nodes,...edges];
+}
+function renderCy(host,spot){
+  const box=host.querySelector('.cy-host');
+  if(!box)return;
+  if(cyView&&cyHost!==box){try{cyView.destroy();}catch{}cyView=null;}
+  if(!cyView){
+    cyView=cytoscape({container:box,elements:[],style:CY_STYLE,boxSelectionEnabled:false,
+      wheelSensitivity:.3,layout:{name:'klay',klay:{direction:'RIGHT',spacing:34},animate:false}});
+    cyHost=box;
+  }
+  const before=new Set(cyView.elements().map(e=>e.id()));
+  cyView.json({elements:cyElements(spot)});
+  try{
+    cyView.layout({name:'klay',klay:{direction:'RIGHT',spacing:34,edgeRouting:'ORTHOGONAL'},animate:false}).run();
+  }catch{
+    cyView.layout({name:'breadthfirst',directed:true,spacingFactor:1.2,animate:false}).run();
+  }
+  cyView.fit(undefined,44);
+  cyView.elements().filter(e=>!before.has(e.id())).forEach(e=>{
+    e.addClass('fresh');
+    e.animate({style:{opacity:1}},{duration:320,easing:'ease-out-cubic',complete:()=>e.removeClass('fresh')});
+  });
+}
 function graphScreenHTML(){
   const trace=current.trace,spot=traceSpot();
   if(!spot)return '';
@@ -1108,11 +1180,14 @@ function graphScreenHTML(){
     '<button data-action="trace-next" class="ts-btn">下一步</button>'+
     '<button data-action="graph-close" class="ts-btn">退出</button></header>'+
     (scalars.length?'<div class="ts-scalars">'+scalars.map(v=>'<span class="ts-scalar"><b>'+esc(v.name)+'</b><span>'+esc(v.value)+'</span></span>').join('')+'</div>':'')+
-    '<div class="ts-graphwrap">'+graphHTML(spot.step.nodes,prev,graphOptions(spot,false))+'</div>';
+    '<div class="cy-host"></div>';
 }
 function renderGraphScreen(){
   const host=$('[data-graph-screen]');
-  if(host)host.innerHTML='<section class="gcanvas">'+graphScreenHTML()+'</section>';
+  if(!host)return;
+  host.innerHTML='<section class="gcanvas">'+graphScreenHTML()+'</section>';
+  const spot=traceSpot();
+  if(spot)renderCy(host,spot);
 }
 function openGraphScreen(){
   const trace=current?.trace,spot=traceStop?traceSpot():null;
@@ -1130,9 +1205,9 @@ function openGraphScreen(){
   };
   renderGraphScreen();
   motion(host,{opacity:[0,1],duration:220});
-  bindGraphNav(host);
-  // The overlay has no size until it has been laid out, so retry once.
-  requestAnimationFrame(()=>{ if(!fitGraph())requestAnimationFrame(()=>fitGraph()); });
+  // Cytoscape owns pan, zoom and fit on the canvas, so none of the hand-written
+  // navigation is needed here.
+  requestAnimationFrame(()=>{ if(cyView){try{cyView.resize();cyView.fit(undefined,44);}catch{}} });
   window.addEventListener('resize',()=>{ if($('[data-graph-screen]'))fitGraph(); },{once:true});
   setTimeout(()=>host.focus(),30);
 }
