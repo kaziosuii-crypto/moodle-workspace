@@ -1044,6 +1044,12 @@ function applyGraphView(){
   g.style.transform='translate('+v.x+'px,'+v.y+'px) scale('+v.zoom+')';
   if(label)label.textContent=Math.round(v.zoom*100)+'%';
 }
+/** The pointer variables of a step, plus what the previous step held. */
+function graphOptions(spot,compact){
+  const pointers=(spot.step.vars||[]).filter(v=>v.kind==='p');
+  const prevPointers=new Map(((spot.previous&&spot.previous.vars)||[]).filter(v=>v.kind==='p').map(v=>[v.name,v.value]));
+  return {compact,pointers,prevPointers};
+}
 function graphScreenHTML(){
   const trace=current.trace,spot=traceSpot();
   if(!spot)return '';
@@ -1054,7 +1060,7 @@ function graphScreenHTML(){
     '<button data-action="trace-prev" class="ts-btn">上一步</button>'+
     '<button data-action="trace-next" class="ts-btn">下一步</button>'+
     '<button data-action="graph-close" class="ts-btn">退出</button></header>'+
-    '<div class="ts-graphwrap">'+graphHTML(spot.step.nodes,prev,{})+'</div>';
+    '<div class="ts-graphwrap">'+graphHTML(spot.step.nodes,prev,graphOptions(spot,false))+'</div>';
 }
 function renderGraphScreen(){
   const host=$('[data-graph-screen]');
@@ -1117,6 +1123,22 @@ function graphHTML(nodes,prev,options){
     });
     width=cols*W+(cols-1)*GX+4; height=rows*H+(rows-1)*GY+4;
   }
+  // Pointer variables sit in their own row above the objects. Each one is a card
+  // carrying an arrow to the address it currently holds — the same arrow model
+  // the struct links use, because a pointer field is nothing but a pointer.
+  const pointers=(options&&options.pointers)||[];
+  const prevPointers=(options&&options.prevPointers)||new Map();
+  const CW=88,CH=26,CG=12,topY=pointers.length?(CH+34):0;
+  if(topY){for(const p of pos.values())p.y+=topY;height+=topY;}
+  let chips='',chipsEdges='';
+  pointers.forEach((v,i)=>{
+    const x=i*(CW+CG)+4;
+    const moved=prevPointers.get(v.name)!==v.value;
+    chips+='<div class="ts-ptr'+(moved?' moved':'')+'" style="left:'+x+'px;top:0;width:'+CW+'px;height:'+CH+'px">'+esc(v.name)+'</div>';
+    const target=pos.get(v.value);
+    if(target)chipsEdges+='<path class="ts-edge ptr'+(moved?' new':'')+'" marker-end="url(#ts-head)" d="M'+(x+CW/2)+' '+CH+' L'+(target.x+W/2)+' '+(target.y)+'"/>';
+    else chipsEdges+='<text class="ts-null" x="'+(x+CW/2)+'" y="'+(CH+18)+'">→ ?</text>';
+  });
   let boxes='',edges='';
   for(const n of nodes){
     const p=pos.get(n.addr);
@@ -1145,9 +1167,7 @@ function graphHTML(nodes,prev,options){
     '<div class="ts-graph" style="width:'+width+'px;height:'+(height+30)+'px">'+
     '<svg class="ts-edges" width="'+(width+60)+'" height="'+(height+40)+'" style="overflow:visible">'+
     '<defs><marker id="ts-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">'+
-    '<path d="M0 0 L10 5 L0 10 z" fill="#1686ef"/></marker>'+
-    '<marker id="ts-head-null" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">'+
-    '<path d="M0 0 L10 5 L0 10 z" fill="#c8c8c8"/></marker></defs>'+edges+'</svg>'+boxes+'</div>';
+    '<path d="M0 0 L10 5 L0 10 z" fill="#1686ef"/></marker></defs>'+edges+chipsEdges+'</svg>'+boxes+chips+'</div>';
 }
 function traceOpenScreen(){
   const trace=current?.trace;
@@ -1194,7 +1214,7 @@ function renderTraceScreen(){
         '<button data-action="trace-close" class="ts-btn">退出全屏</button>'+
       '</header>'+
       '<div class="ts-stack">'+stackHTML(spot.step.stack,spot.step.returns)+'</div>'+
-      (spot.step.nodes.length?'<div class="ts-graphwrap preview">'+graphHTML(spot.step.nodes,graphKeys(spot.previous&&spot.previous.nodes),{compact:true})+
+      (spot.step.nodes.length?'<div class="ts-graphwrap preview">'+graphHTML(spot.step.nodes,graphKeys(spot.previous&&spot.previous.nodes),graphOptions(spot,true))+
         '<button class="ts-canvas-open" data-action="graph-full">打开数据画板 · 共 '+spot.step.nodes.length+' 个节点</button></div>':'')+
       '<div class="ts-body">'+
         '<div class="ts-code">'+traceCodeHTML(spot.step.line,4)+'</div>'+
