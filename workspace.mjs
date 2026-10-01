@@ -1189,23 +1189,31 @@ function graphHTML(nodes,prev,options){
     for(const n of order){const node=graph.node('n:'+n.addr);pos.set(n.addr,{x:node.x-W/2,y:node.y-H/2});}
     for(const v of pointers){const node=graph.node('p:'+v.name);if(node)pos.set('p:'+v.name,{x:node.x-CW/2,y:node.y-CH/2});}
     width=(graph.graph().width||400)+8; height=(graph.graph().height||200)+8;
-    // dagre gives one long rank per list node; fold that strip into rows so the
-    // structure fits a window instead of stretching thousands of pixels wide.
-    const targetW=Math.max(560,Math.min(1500,(window.innerWidth||1200)-260));
-    if(width>targetW*1.5&&order.length>4){
+    // A chain is not laid out by dagre: it is drawn as a snake, one row forwards
+    // and the next backwards. Neighbours then always touch, and a row change is a
+    // short vertical hop instead of a line across the whole diagram.
+    const outDegree=new Map(order.map(n=>[n.addr,0]));
+    for(const n of order){
+      const link=n.fields.find(f=>f.kind==='p'&&byAddr.has(f.value));
+      if(link)outDegree.set(n.addr,(outDegree.get(n.addr)||0)+1);
+    }
+    const isChain=order.length===nodes.length&&[...outDegree.values()].every(v=>v<=1);
+    if(isChain){
+      const targetW=Math.max(560,Math.min(1500,(window.innerWidth||1200)-260));
       const perRow=Math.max(2,Math.floor((targetW+GX)/(W+GX)));
-      const ranked=order.slice().sort((a,b)=>pos.get(a.addr).x-pos.get(b.addr).x);
-      ranked.forEach((n,i)=>{
+      order.forEach((n,i)=>{
         const row=Math.floor(i/perRow),col=i%perRow;
-        pos.set(n.addr,{x:col*(W+GX)+2,y:row*(H+GY)+40});
+        pos.set(n.addr,{x:(row%2?perRow-1-col:col)*(W+GX)+2,y:row*(H+GY)+44});
       });
+      const seenAt=new Map();
       for(const v of pointers){
         const target=pos.get(v.value);
         if(!target)continue;
-        pos.set('p:'+v.name,{x:target.x+W-CW,y:Math.max(0,target.y-30)});
+        const k=seenAt.get(v.value)||0;seenAt.set(v.value,k+1);
+        pos.set('p:'+v.name,{x:Math.max(2,target.x+W-CW-k*26),y:Math.max(0,target.y-34)});
       }
       width=perRow*W+(perRow-1)*GX+4;
-      height=Math.ceil(ranked.length/perRow)*(H+GY)+20;
+      height=Math.ceil(order.length/perRow)*(H+GY)+24;
     }
   }
   let chips='',chipsEdges='',lost=0;
