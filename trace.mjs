@@ -213,23 +213,38 @@ function walkerSource(structs) {
   return out;
 }
 
-/** "int isPrime(int n) {" -> return type, name, parameter list. */
-function structuralOf(line) {
-  let out = '', i = 0, init = -1, quote = '';
-  while (i < line.length) {
+/**
+ * Count block braces on one line, ignoring the braces of an initialiser.
+ *
+ * "const char *w[][4] = {" / "  {\"a\",\"1\"}," / "};" spans three lines. Counting its
+ * braces as block braces pushed a scope that never matched its pop, and - worse - the
+ * marker written before the first row landed *inside* the braces, so the instrumented
+ * source no longer compiled at all. `depth` carries how deep inside an initialiser the
+ * previous line left us, so those lines get no marker and no scope.
+ */
+function scanBraces(line, depth) {
+  let opens = 0, closes = 0, quote = '';
+  for (let i = 0; i < line.length; i++) {
     const c = line[i];
-    if (quote) { out += c; if (c === '\\') { i += 2; continue; } if (c === quote) quote = ''; i++; continue; }
-    if (c === '"' || c === "'") { quote = c; out += c; i++; continue; }
-    if (init >= 0) {
-      if (c === '{') init++;
-      else if (c === '}' && --init === 0) { out += '0'; init = -1; i++; continue; }
-      i++; continue;
-    }
+    if (quote) { if (c === '\\') i++; else if (c === quote) quote = ''; continue; }
+    if (c === '"' || c === "'") { quote = c; continue; }
     if (c === '/' && line[i + 1] === '/') break;
-    if (c === '=' && /^\s*\{/.test(line.slice(i + 1))) { init = 0; out += '='; i++; continue; }
-    out += c; i++;
+    if (depth > 0) {
+      if (c === '{') depth++;
+      else if (c === '}') depth--;
+      continue;
+    }
+    if (c === '=' && /^\s*\{/.test(line.slice(i + 1))) {
+      // Skip the '=' and the '{' that opens the initialiser: the depth already counts
+      // that brace, and consuming it twice left the line ending still one level deep.
+      i = line.indexOf('{', i);
+      depth = 1;
+      continue;
+    }
+    if (c === '{') opens++;
+    else if (c === '}') closes++;
   }
-  return out;
+  return { depth, opens, closes };
 }
 const FUNCTION = /^([A-Za-z_][\w \t\*]*?)([\s\*]+)([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{?\s*$/;
 
@@ -276,6 +291,8 @@ export function instrument(source) {
   // A head written Allman-style ("static void f(void)" then "{" on the next line) has
   // no brace on its own line, so it has to be held here until that brace shows up.
   let pendingHead = null;
+  // How deep inside a multi-line initialiser the previous line left us.
+  let initDepth = 0;
   /** Open a function's body scope, declare its parameters, and announce the call. */
   const enterFunction = (fn, headIndent) => {
     functionBase = braceDepth;
@@ -310,7 +327,9 @@ export function instrument(source) {
     const indent = (raw.match(/^\s*/) || [''])[0];
     const unbracedHead = /^(if|for|while)\b/.test(previous) && /\)\s*$/.test(previous);
     const boundary = previous === '' || BOUNDARY.test(previous);
-    if (functionBase !== null && boundary && !SKIP(body) && !unbracedHead) {
+    // initDepth is the depth the previous line left behind: a row of a multi-line
+    // initialiser must never get a marker, or the braces it sits between stop balancing.
+    if (functionBase !== null && boundary && !SKIP(body) && !unbracedHead && initDepth === 0) {
       out.push(indent + marker(i + 1, visible(scopes)));
       count++;
       // Reads are recorded separately so the UI can light up the exact array cell.
@@ -387,9 +406,11 @@ export function instrument(source) {
     }
     // An initialiser such as "= {1, 2, 3}" carries braces that are not a scope
     // and would inflate the depth, hiding the declaration itself.
-    const structural = structuralOf(raw);
-    const opens = (structural.match(/\{/g) || []).length;
-    const closes = (structural.match(/\}/g) || []).length;
+    // Must run before the marker decision below is used for the next line, and it is what
+    // keeps the rows of a multi-line initialiser from being mistaken for block scopes.
+    const scan = scanBraces(raw, initDepth);
+    const opens = scan.opens, closes = scan.closes;
+    initDepth = scan.depth;
     // Depth before this line opens its brace: a function header is a top-level
     // line that opens a block and names a parameter list.
     const isFunctionHead = braceDepth === 0 && opens > 0 && /\(/.test(body);

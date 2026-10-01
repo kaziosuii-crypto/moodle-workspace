@@ -13,6 +13,8 @@ const CASES = {
   // 点「单步」只会得到「没有识别到可以逐行执行的语句」。
   // printf 不带换行时，下一个 marker 会落在同一行。按整行处理就会把 marker 当成
   // 程序自己的输出打印出来（"数组元素：__WS_STEP__78|..."）。
+  // 跨行初始化列表：marker 不能插进 {...} 里面，否则插桩后的源码直接编译不过。
+  'multi-line initialiser': ['#include <stdlib.h>', 'int main(void) {', '    const char *w[][3] = {', '    {"春", "3", "4"},', '    {"夏", "6", "7"},', '    {"秋", "9", "10"}', '    };', '    int n = sizeof(w) / sizeof(w[0]);', '    int m = atoi(w[1][1]);', '    printf("%d %d %s\\n", n, m, w[0][0]);', '    return 0;', '}'],
   'printf without a trailing newline': ['int main(void) {', '    printf("a");', '    int x = 1;', '    printf("b");', '    printf("%d\\n", x);', '    return 0;', '}'],
   'allman-style heads': ['static void show(int n)', '{', '    printf("%d\\n", n);', '}', 'int main(void)', '{', '    int i = 0;', '    for (i = 0; i < 3; i++)', '    {', '        show(i);', '    }', '    return 0;', '}'],
   'switch + nested loops': ['int main(void) {', '    int total = 0;', '    for (int i = 0; i < 3; i++) {', '        for (int j = 0; j < 3; j++) {', '            switch (i) {', '                case 0: total += 1; break;', '                default: total += 2;', '            }', '        }', '    }', '    printf("%d\\n", total);', '    return 0;', '}'],
