@@ -10,6 +10,7 @@ import { esc, text, safeURL, ioDisplay, parseProblem, parseNavigation, parseResu
 import { parseCompileIssues, diffBlock, describeDiff } from './diagnostics.mjs';
 import { SANDBOX_SOURCE } from './sandbox.mjs';
 import { getKey, setKey, hasKey, maskKey } from './ai-key.mjs';
+import dagre from 'dagre';
 import { instrument, parseTrace, describeStep, viewIndices, changedNames, changedValues } from './trace.mjs';
 import { animate, stagger } from 'animejs';
 import { AI_CONFIG } from './ai-config.mjs';
@@ -1154,35 +1155,48 @@ function graphHTML(nodes,prev,options){
   for(const n of nodes)if(!seen.has(n.addr))order.push(n);
   const cyclic=order.length>2&&next.get(order[order.length-1].addr)===order[0].addr;
   if(compact)nodes=order;
-  const pos=new Map();
-  let width,height;
-  {
-    // A closed chain simply gets one more cell, so the return edge spans the row
-    // instead of a whole circle of mostly empty space.
-    if(cyclic&&!compact)order.push(order[0]);
-    const rows=Math.ceil(order.length/cols);
-    order.forEach((n,i)=>{
-      const row=Math.floor(i/cols), col=i%cols;
-      pos.set(n.addr,{x:(row%2?cols-1-col:col)*(W+GX)+2,y:row*(H+GY)+2});
-    });
-    width=cols*W+(cols-1)*GX+4; height=rows*H+(rows-1)*GY+4;
-  }
-  // Pointer variables sit in their own row above the objects. Each one is a card
-  // carrying an arrow to the address it currently holds — the same arrow model
-  // the struct links use, because a pointer field is nothing but a pointer.
   const pointers=(options&&options.pointers)||[];
   const prevPointers=(options&&options.prevPointers)||new Map();
-  const CW=88,CH=26,CG=12,topY=pointers.length?(CH+34):0;
-  if(topY){for(const p of pos.values())p.y+=topY;height+=topY;}
-  let chips='',chipsEdges='';
-  pointers.forEach((v,i)=>{
-    const x=i*(CW+CG)+4;
+  const CW=88,CH=26;
+  const pos=new Map();
+  let width,height;
+  if(compact){
+    order.forEach((n,i)=>pos.set(n.addr,{x:i*(W+GX)+2,y:0}));
+    width=order.length*W+(order.length-1)*GX+4; height=H+4;
+  }else{
+    // dagre places everything: layered left-to-right for lists and trees, cycle
+    // aware, and the pointer cards become nodes too so they settle next to the
+    // object they point at instead of in a fixed row.
+    const graph=new dagre.graphlib.Graph();
+    graph.setGraph({rankdir:'LR',nodesep:28,ranksep:70,marginx:16,marginy:16});
+    graph.setDefaultEdgeLabel(()=>({}));
+    for(const n of order)graph.setNode('n:'+n.addr,{width:W,height:H});
+    for(const n of order){
+      const link=n.fields.find(f=>f.kind==='p'&&byAddr.has(f.value));
+      if(link)graph.setEdge('n:'+n.addr,'n:'+link.value);
+    }
+    for(const v of pointers){
+      if(!byAddr.has(v.value))continue;
+      graph.setNode('p:'+v.name,{width:CW,height:CH});
+      graph.setEdge('p:'+v.name,'n:'+v.value);
+    }
+    dagre.layout(graph);
+    for(const n of order){const node=graph.node('n:'+n.addr);pos.set(n.addr,{x:node.x-W/2,y:node.y-H/2});}
+    for(const v of pointers){const node=graph.node('p:'+v.name);if(node)pos.set('p:'+v.name,{x:node.x-CW/2,y:node.y-CH/2});}
+    width=(graph.graph().width||400)+8; height=(graph.graph().height||200)+8;
+  }
+  let chips='',chipsEdges='',lost=0;
+  pointers.forEach(v=>{
     const moved=prevPointers.get(v.name)!==v.value;
-    chips+='<div class="ts-ptr'+(moved?' moved':'')+'" style="left:'+x+'px;top:0;width:'+CW+'px;height:'+CH+'px">'+esc(v.name)+'</div>';
+    let at=pos.get('p:'+v.name);
+    if(!at&&!byAddr.has(v.value)){at={x:8+(lost++)*96,y:height-30};}
+    if(!at)return;
+    chips+='<div class="ts-ptr'+(moved?' moved':'')+'" style="left:'+at.x+'px;top:'+at.y+'px;width:'+CW+'px;height:'+CH+'px">'+esc(v.name)+'</div>';
     const target=pos.get(v.value);
-    if(target)chipsEdges+='<path class="ts-edge ptr'+(moved?' new':'')+'" marker-end="url(#ts-head)" d="M'+(x+CW/2)+' '+CH+' L'+(target.x+W/2)+' '+(target.y)+'"/>';
-    else chipsEdges+='<text class="ts-null" x="'+(x+CW/2)+'" y="'+(CH+18)+'">→ ?</text>';
+    if(target)chipsEdges+='<path class="ts-edge ptr'+(moved?' new':'')+'" marker-end="url(#ts-head)" d="M'+(at.x+CW/2)+' '+(at.y+CH)+' L'+(target.x+W/2)+' '+(target.y)+'"/>';
+    else chipsEdges+='<text class="ts-null" x="'+(at.x+CW/2)+'" y="'+(at.y+CH+14)+'">→ ?</text>';
   });
+  if(lost)height+=34;
   let boxes='',edges='';
   for(const n of nodes){
     const p=pos.get(n.addr);

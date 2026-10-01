@@ -1,7 +1,7 @@
 {
   "name": "moodle-workspace",
   "private": true,
-  "version": "6.0.30",
+  "version": "6.0.31",
   "scripts": {
     "build": "node build.mjs",
     "test": "node --test tests.mjs",
@@ -16,7 +16,8 @@
     "@codemirror/search": "6.5.10",
     "@codemirror/state": "6.5.2",
     "@codemirror/view": "6.36.5",
-    "animejs": "^4.5.0"
+    "animejs": "^4.5.0",
+    "dagre": "^0.8.5"
   },
   "devDependencies": {
     "esbuild": "0.25.10",
