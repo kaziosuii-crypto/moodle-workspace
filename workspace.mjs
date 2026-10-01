@@ -1112,7 +1112,11 @@ const CY_STYLE=[
     'font-family':'Consolas, "Cascadia Code", monospace','color':'#3f3f46','text-wrap':'wrap',
     'text-max-width':130,'text-valign':'center','text-halign':'center','padding':6}},
   {selector:'node[kind="ptr"]',style:{'background-color':'#eef6ff','border-color':'#b9dcff','color':'#1686ef',
-    'width':92,'height':30,'font-size':12,'font-weight':'bold'}},
+    'width':96,'height':30,'font-size':12,'font-weight':'bold'}},
+  // Plain values live in the graph too, so the picture is the whole memory state
+  // and not just the heap.
+  {selector:'node[kind="var"]',style:{'background-color':'#f5f6f8','border-color':'#e2e2e4','color':'#3f3f46',
+    'width':104,'height':30,'font-size':12}},
   {selector:'node[kind="ptr"][moved="1"]',style:{'background-color':'#fff4e0','border-color':'#f0d29b','color':'#9c7625'}},
   {selector:'edge',style:{'width':1.6,'line-color':'#1686ef','target-arrow-color':'#1686ef',
     'target-arrow-shape':'triangle','curve-style':'bezier','arrow-scale':.85,'font-size':10,
@@ -1138,7 +1142,11 @@ function cyElements(spot){
   }
   const prev=new Map(((spot.previous&&spot.previous.vars)||[]).map(v=>[v.name,v.value]));
   for(const v of (spot.step.vars||[])){
-    if(v.kind!=='p')continue;
+    if(v.kind!=='p'){
+      // Array elements stay out for now; they would flood the graph cell by cell.
+      if(v.name.indexOf('[')<0)nodes.push({data:{id:'v:'+v.name,kind:'var',label:v.name+' = '+v.value}});
+      continue;
+    }
     const id='p:'+v.name;
     nodes.push({data:{id,kind:'ptr',label:v.name,moved:prev.get(v.name)!==v.value?'1':'0'}});
     if(live.has(v.value))edges.push({data:{id:'e:'+id,source:id,target:'n:'+v.value,kind:'ptr'}});
@@ -1183,15 +1191,12 @@ function graphScreenHTML(){
   const trace=current.trace,spot=traceSpot();
   if(!spot)return '';
   const prev=graphKeys(spot.previous&&spot.previous.nodes);
-  // Plain variables belong on the canvas too, not only in the side panel.
-  const scalars=(spot.step.vars||[]).filter(v=>v.kind!=='p'&&v.name.indexOf('[')<0);
   return '<header class="ts-head"><span class="ts-dot"></span><span class="ts-title">数据画板</span>'+
     '<span class="ts-step">'+esc(traceLabel())+' · '+spot.step.nodes.length+' 个节点</span><span class="grow"></span>'+
     '<button data-action="trace-play" class="ts-btn">'+(trace.playing?'暂停':'播放')+'</button>'+
     '<button data-action="trace-prev" class="ts-btn">上一步</button>'+
     '<button data-action="trace-next" class="ts-btn">下一步</button>'+
     '<button data-action="graph-close" class="ts-btn">退出</button></header>'+
-    (scalars.length?'<div class="ts-scalars">'+scalars.map(v=>'<span class="ts-scalar"><b>'+esc(v.name)+'</b><span>'+esc(v.value)+'</span></span>').join('')+'</div>':'')+
     '<div class="cy-host"></div>';
 }
 function renderGraphScreen(){
