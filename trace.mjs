@@ -75,6 +75,7 @@ export function declarationsIn(line) {
 
 /** "int a" -> one printable field per name, arrays expanded element by element. */
 function fieldsOf(variable) {
+  if (variable.kind === 'p') return [];
   if (!variable.size) return [{ label: variable.name, expr: variable.name, kind: variable.kind, fmt: variable.fmt }];
   // A char array is one string. Expanding it would print each element with %s,
   // i.e. dereference a char as a pointer.
@@ -99,6 +100,69 @@ function marker(line, scope) {
   const format = [MARK + '%d'].concat(fields.map(f => f.kind + ':' + f.label + '=' + f.fmt)).join('|');
   const args = [String(line)].concat(fields.map(f => f.expr));
   return 'if(__ws_steps++<' + STEP_CAP + ')printf("' + format + '\\n",' + args.join(',') + ');';
+}
+
+/**
+ * Struct support.
+ *
+ * Pointer-to-struct fields are what make a linked list or a tree readable, so the
+ * file's struct definitions are scanned first. For every struct that points to
+ * itself a walker is generated that prints each node's address, its fields and
+ * where each link goes; the UI turns those addresses into arrows.
+ */
+const STRUCT_OPEN = /^\s*struct\s+([A-Za-z_]\w*)\s*\{/;
+const STRUCT_PTR_VAR = /^\s*struct\s+([A-Za-z_]\w*)\s*\*\s*([A-Za-z_]\w*)\s*(?:=|;|,|\))/;
+
+function addStructFields(def, text) {
+  for (const part of splitTop(text, ';')) {
+    const body = part.trim();
+    if (!body) continue;
+    const link = body.match(/^struct\s+([A-Za-z_]\w*)\s*\*\s*([A-Za-z_]\w*)$/);
+    if (link) { def.fields.push({ name: link[2], kind: 'p', target: link[1] }); continue; }
+    if (body.includes('*')) continue;
+    for (const v of declarationsIn(body + ';')) def.fields.push({ name: v.name, kind: v.kind, fmt: v.fmt, size: v.size });
+  }
+}
+
+export function structDefs(source) {
+  const structs = new Map();
+  let current = null;
+  for (const raw of String(source || '').split('\n')) {
+    const line = raw.trim();
+    if (!current) {
+      const open = line.match(STRUCT_OPEN);
+      if (!open) continue;
+      current = { name: open[1], fields: [] };
+      const rest = line.slice(line.indexOf('{') + 1);
+      if (rest.includes('}')) { structs.set(current.name, current); current = null; }
+      else addStructFields(current, rest);
+      continue;
+    }
+    if (line.startsWith('}')) { structs.set(current.name, current); current = null; continue; }
+    addStructFields(current, line);
+  }
+  return structs;
+}
+
+/** One C function per self-referential struct that prints every reachable node. */
+function walkerSource(structs) {
+  let out = '';
+  for (const [name, def] of structs) {
+    const links = def.fields.filter(f => f.kind === 'p' && f.target === name);
+    if (!links.length) continue;
+    out += 'static void __ws_walk_' + name + '(struct ' + name + '* __ws_p, int __ws_d){\n';
+    out += '  if(!__ws_p || __ws_d > 24 || __ws_steps > ' + STEP_CAP + ')return;\n';
+    out += '  printf("__WS_NODE__' + name + '|%p", (void*)__ws_p);\n';
+    for (const f of def.fields) {
+      if (f.kind === 'p') out += '  printf("|p:' + f.name + '=%p", (void*)__ws_p->' + f.name + ');\n';
+      else if (f.kind === 's') out += '  printf("|s:' + f.name + '=%.24s", __ws_p->' + f.name + ');\n';
+      else out += '  printf("|' + f.kind + ':' + f.name + '=' + f.fmt + '", __ws_p->' + f.name + ');\n';
+    }
+    out += '  printf("\\n");\n';
+    for (const l of links) out += '  __ws_walk_' + name + '(__ws_p->' + l.name + ', __ws_d + 1);\n';
+    out += '}\n';
+  }
+  return out;
 }
 
 /** "int isPrime(int n) {" -> return type, name, parameter list. */
@@ -137,6 +201,8 @@ const SKIP = body => !body || body.startsWith('#') || body.startsWith('}') ||
  */
 export function instrument(source) {
   const lines = String(source || '').split('\n');
+  const structs = structDefs(source);
+  const walkable = new Set([...structs].filter(([, d]) => d.fields.some(f => f.kind === 'p' && f.target === d.name)).map(([n]) => n));
   const out = [];
   const scopes = [[]];
   let count = 0;
@@ -164,6 +230,11 @@ export function instrument(source) {
           const index = hit[1].trim();
           if (/[+-]{2}|=/.test(index)) continue;
           out.push(indent + 'printf("__WS_READ__%s|%d\\n","' + variable.name + '",(' + index + '));');
+        }
+      }
+      for (const variable of visible(scopes)) {
+        if (variable.kind === 'p' && walkable.has(variable.struct)) {
+          out.push(indent + '__ws_walk_' + variable.struct + '(' + variable.name + ',0);');
         }
       }
       if (currentFunction && currentFunction.ret && /^return\b/.test(body)) {
@@ -196,6 +267,9 @@ export function instrument(source) {
     if (!isFunctionHead && opens === 0) {
       for (const variable of declarationsIn(body)) scopes[scopes.length - 1].push(variable);
     }
+    // "struct node* p" is a pointer, not a value: it is shown as a graph node.
+    const sv = functionBase !== null ? body.match(STRUCT_PTR_VAR) : null;
+    if (sv) scopes[scopes.length - 1].push({ name: sv[2], kind: 'p', struct: sv[1], size: 0 });
     // "for (int i = 0; ...)" declares its counter in the loop's own scope, and a
     // brace on the same line would otherwise hide it from the scan above.
     const header = raw.match(/\bfor\s*\(([^;]*);/);
@@ -216,8 +290,11 @@ export function instrument(source) {
     }
     if (body) previous = body;
   }
-  const text = out.join('\n');
-  return { source: '#include <stdio.h>\nstatic int __ws_steps=0;\n' + text, count };
+  // The walker bodies dereference struct fields, so they go after the user's
+  // struct definitions; the prototypes only need a forward declaration.
+  const names = [...walkable];
+  const prologue = names.map(n => 'struct ' + n + ';').concat(names.map(n => 'static void __ws_walk_' + n + '(struct ' + n + '*, int);')).join('\n');
+  return { source: '#include <stdio.h>\nstatic int __ws_steps=0;\n' + prologue + '\n' + out.join('\n') + '\n' + walkerSource(structs), count };
 }
 
 /** Split program output into replayed steps (line, live variables, output so far). */
@@ -245,7 +322,7 @@ export function parseTrace(stdout) {
   for (const line of String(stdout || '').split('\n')) {
     if (line.startsWith(MARK)) {
       const fields = line.slice(MARK.length).split('|');
-      steps.push({ line: Number(fields[0]) || 0, vars: fields.slice(1).map(parseField).filter(Boolean), output: lines.join('\n'), stack: stack.map(f => f.name), reads: [], returns: [] });
+      steps.push({ line: Number(fields[0]) || 0, vars: fields.slice(1).map(parseField).filter(Boolean), output: lines.join('\n'), stack: stack.map(f => f.name), reads: [], returns: [], nodes: [] });
       last = steps[steps.length - 1];
       continue;
     }
@@ -260,6 +337,17 @@ export function parseTrace(stdout) {
       const name = bar < 0 ? body : body.slice(0, bar);
       stack.pop();
       if (last) last.returns.push({ name, value: bar < 0 ? null : body.slice(bar + 1).replace(/^ret=/, '') });
+      continue;
+    }
+    if (line.startsWith('__WS_NODE__')) {
+      const body = line.slice(11), bar = body.indexOf('|');
+      const parts = (bar < 0 ? '' : body.slice(bar + 1)).split('|');
+      // A circular list walks forever; one entry per address is what gets drawn.
+      if (last && !last.nodes.some(n => n.addr === parts[0])) last.nodes.push({
+        type: bar < 0 ? body : body.slice(0, bar),
+        addr: parts[0],
+        fields: parts.slice(1).map(f => { const eq = f.indexOf('='); const key = f.slice(0, eq), c = key.indexOf(':'); return { name: c < 0 ? key : key.slice(c + 1), kind: c < 0 ? 'i' : key.slice(0, c), value: f.slice(eq + 1) }; })
+      });
       continue;
     }
     if (line.startsWith('__WS_READ__')) {
