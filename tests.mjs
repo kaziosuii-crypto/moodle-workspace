@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
+import { readFileSync } from 'node:fs';
 import { ioText, richContent, formatTime, parseProblem, parseNavigation, parseResult, safeURL } from './adapter.mjs';
 import { parseTutorResponse, tutorNarrative, tutorPrompt } from './tutor.mjs';
 const base='http://example.test/moodle/mod/programming/view.php?a=117';
@@ -74,4 +75,12 @@ test('tutor prompt keeps test inputs expected outputs and submission evidence',(
   assert.ok(prompt.includes(JSON.stringify(context)));
   assert.match(prompt,/诊断错误/);
   assert.match(prompt,/why\?/);
+});
+
+test('逐行执行的上一步/下一步读的是真实存在的游标字段',()=>{
+  // 这两个按钮曾经用 current.trace.index 算目标步，而 index 从来没被赋过值，
+  // 于是 (undefined ?? 0) ± 1 永远只得到第 1、2 步 —— 手动点怎么都走不动。
+  const source=readFileSync(new URL('./workspace.mjs',import.meta.url),'utf8');
+  assert.ok(!/current\.trace\??\.index/.test(source),
+    'trace.index 从不赋值；用 cursor 算下一步');
 });

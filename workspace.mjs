@@ -1128,6 +1128,10 @@ const CY_STYLE=[
 // Cell metrics for the hand-placed chain layout. They mirror the node sizes in
 // CY_STYLE above, which is why they live next to it.
 const CY_W=142,CY_H=62,CY_GX=56,CY_GY=80,CY_CHIP=112;
+// A ring only reads as a ring while it fits the canvas. Past about a dozen boxes the
+// circle has to shrink so far that fit() renders the text illegible, so bigger loops
+// keep the serpentine: readable text, one long closing edge.
+const CY_RING_MAX=12;
 /** `%p` prints a null pointer as `0x0` or `(nil)` depending on the libc. */
 const nullPtr=value=>!value||/^(?:\(nil\)|nil|0|0x0+)$/i.test(String(value));
 /**
@@ -1156,6 +1160,34 @@ function cyRing(structs){
   }
   return cur===structs[0].addr;
 }
+/**
+ * True when one link per node walks the whole structure in a line.
+ *
+ * A doubly linked list has two pointer fields per node, so the "at most one link"
+ * test failed and it was handed to KLay - which, with an edge in both directions,
+ * folds the list back on itself. Following just the first live link instead finds
+ * the forward chain, and the back links become short arrows between neighbours.
+ */
+function cyChainOrder(structs){
+  const byAddr=new Set(structs.map(n=>n.addr));
+  const at=new Map(structs.map(n=>[n.addr,n]));
+  const link=new Map();
+  for(const n of structs){
+    const f=n.fields.find(f=>f.kind==='p'&&byAddr.has(f.value));
+    if(f)link.set(n.addr,f.value);
+  }
+  const walkFrom=start=>{
+    const seq=[],taken=new Set();
+    let cur=start;
+    while(cur&&byAddr.has(cur)&&!taken.has(cur)){taken.add(cur);seq.push(at.get(cur));cur=link.get(cur);}
+    return seq;
+  };
+  let best=[];
+  for(const n of structs){const seq=walkFrom(n.addr);if(seq.length>best.length)best=seq;}
+  const seen=new Set(best.map(n=>n.addr));
+  return {order:best.concat(structs.filter(n=>!seen.has(n.addr))),covered:best.length};
+}
+function cyChain(structs){return structs.length>0&&cyChainOrder(structs).covered===structs.length;}
 function cyElements(spot){
   const live=new Set(spot.step.nodes.map(n=>n.addr));
   const nodes=[],edges=[];
@@ -1236,12 +1268,14 @@ function cyArrange(els,spot,cols,shape){
     }
     railY=ry+120;
   }else{
-    for(let i=0;i<structs.length;i++){
+    // Chain order, not walker order - see cyChainOrder.
+    const seq=cyChainOrder(structs).order;
+    for(let i=0;i<seq.length;i++){
       const r=Math.floor(i/cols),c=i%cols;
       const vc=(r%2)?(cols-1-c):c;
       const p={x:vc*(CY_W+CY_GX),y:r*(CY_H+CY_GY)};
-      at.set('n:'+structs[i].addr,p);
-      positions.set('n:'+structs[i].addr,p);
+      at.set('n:'+seq[i].addr,p);
+      positions.set('n:'+seq[i].addr,p);
     }
     const rows=Math.max(1,Math.ceil(structs.length/cols));
     railY=(rows-1)*(CY_H+CY_GY)+CY_H/2+92;
@@ -1284,11 +1318,19 @@ function renderCy(host,spot){
   // by hand as a serpentine shaped like the viewport instead; KLay keeps the job for
   // structures that actually branch or loop.
   const count=spot.step.nodes.length;
-  const ring=cyRing(spot.step.nodes);
-  const chain=!ring&&spot.step.nodes.every(nd=>nd.fields.filter(f=>f.kind==='p').length<=1);
+  const ring=spot.step.nodes.length<=CY_RING_MAX&&cyRing(spot.step.nodes);
+  const chain=!ring&&cyChain(spot.step.nodes);
   const rect=box.getBoundingClientRect();
   const aspect=(rect.width||1200)/Math.max(240,rect.height||700);
-  const cols=Math.max(2,Math.min(14,Math.round(Math.sqrt(Math.max(1,count)*aspect*(CY_H+CY_GY)/(CY_W+CY_GX)))));
+  // Pick the column count whose overall shape is closest to the viewport's. The closed
+  // form this replaces rounded to the wrong side on a wide canvas with few nodes,
+  // which turned a five-node list into a tall narrow snake.
+  let cols=1,bestShape=Infinity;
+  for(let c=1;c<=16&&c<=Math.max(1,count);c++){
+    const rows=Math.ceil(count/c);
+    const score=Math.abs(Math.log((c*(CY_W+CY_GX))/(rows*(CY_H+CY_GY))/aspect));
+    if(score<bestShape){bestShape=score;cols=c;}
+  }
   const laid=cyArrange(cyElements(spot),spot,cols,ring?'ring':(chain?'grid':null));
   cyView.json({elements:laid.elements});
   if(laid.positions){
@@ -1367,10 +1409,9 @@ function graphHTML(nodes,prev,options){
   const byAddr=new Map(nodes.map(n=>[n.addr,n]));
   const next=new Map();
   for(const n of nodes){const l=n.fields.find(f=>f.kind==='p'&&byAddr.has(f.value));if(l)next.set(n.addr,l.value);}
-  const order=[],seen=new Set();
-  let walk=nodes.length?nodes[0].addr:null;
-  while(walk&&byAddr.has(walk)&&!seen.has(walk)){seen.add(walk);order.push(byAddr.get(walk));walk=next.get(walk);}
-  for(const n of nodes)if(!seen.has(n.addr))order.push(n);
+  // Chain order, not the order the walker happened to emit the nodes in - see
+  // cyChainOrder. Getting this wrong drew real links as backwards arrows.
+  const order=cyChainOrder(nodes).order;
   const cyclic=order.length>2&&next.get(order[order.length-1].addr)===order[0].addr;
   if(compact)nodes=order;
   // The preview shows a slice of the graph, so a pointer aimed outside it would
@@ -1448,6 +1489,10 @@ function graphHTML(nodes,prev,options){
     else chipsEdges+='<text class="ts-null" x="'+(at.x+CW/2)+'" y="'+(at.y+CH+14)+'">→ ?</text>';
   });
   if(lost)height+=34;
+  // Which directed links exist, so a pair pointing at each other can be told apart.
+  const directed=new Set();
+  for(const n of nodes)for(const f of n.fields)if(f.kind==='p')directed.add(n.addr+'|'+f.value);
+  const drawnPair=new Map();
   let boxes='',edges='';
   for(const n of nodes){
     const p=pos.get(n.addr);
@@ -1468,7 +1513,20 @@ function graphHTML(nodes,prev,options){
       const fit=pad=>Math.min(dx?(W/2+pad)/Math.abs(dx):1e9, dy?(H/2+pad)/Math.abs(dy):1e9);
       const start=fit(9), end=fit(13);
       if(start>=1||end>=1)continue;
-      const fx=ax+dx*start, fy=ay+dy*start, ex=bx-dx*end, ey=by-dy*end;
+      let fx=ax+dx*start, fy=ay+dy*start, ex=bx-dx*end, ey=by-dy*end;
+      // Two nodes that point at each other - or one node with two links to the same
+      // place - drew the identical centre-to-centre line twice, so the two heads met
+      // in the middle and read as one broken double arrow. Fanning the duplicates
+      // apart perpendicular to the line keeps both directions legible.
+      const pair=n.addr+'|'+f.value;
+      const dup=drawnPair.get(pair)||0;
+      drawnPair.set(pair,dup+1);
+      const apart=(directed.has(f.value+'|'+n.addr)?1:0)+dup;
+      if(apart){
+        const len=Math.hypot(dx,dy)||1,off=apart*8;
+        const ox=-dy/len*off, oy=dx/len*off;
+        fx+=ox;fy+=oy;ex+=ox;ey+=oy;
+      }
       edges+='<path class="ts-edge'+fresh+'" marker-end="url(#ts-head)" d="M'+fx.toFixed(1)+' '+fy.toFixed(1)+' L'+ex.toFixed(1)+' '+ey.toFixed(1)+'"/>';
     }
   }
@@ -2033,8 +2091,10 @@ async function handleClick(event) {
     case 'refresh-problem':return loadExercise(current.viewURL,false);
     case 'complete':return complete();
     case 'trace':return startTrace();
-    case 'trace-next':return traceGoto((current.trace?.index??0)+1);
-    case 'trace-prev':return traceGoto((current.trace?.index??0)-1);
+    // traceGoto advances trace.cursor; trace.index does not exist, so reading it here
+    // pinned both buttons to step 1 and step 2 forever.
+    case 'trace-next':return traceGoto((current.trace?.cursor??0)+1);
+    case 'trace-prev':return traceGoto((current.trace?.cursor??0)-1);
     case 'trace-play':return tracePlay();
     case 'trace-stop':return traceStop();
     case 'trace-screen':return traceOpenScreen();

@@ -198,7 +198,7 @@ input,textarea,select{transition:border-color var(--t-fast) var(--ease),box-shad
 .ts-preview .ts-graphwrap{max-height:150px;border-bottom:0;cursor:default;padding-bottom:2px}
 .ts-preview-bar{display:flex;align-items:center;gap:10px;padding:0 40px 10px}
 .ts-preview-note{font-size:11px;color:#b0b0b0}
-.ts-canvas-open{position:static;font-size:12px;padding:6px 12px;background:#eef6ff;color:#1686ef;border-radius:7px;font-weight:600}
+.ts-canvas-open{font-size:12px;padding:6px 12px;background:#eef6ff;color:#1686ef;border-radius:7px;font-weight:600}
 .ts-canvas-open:hover{background:#e2efff}
 .cy-host{flex:1;min-height:0;width:100%}
 .gcanvas{position:relative}
@@ -211,8 +211,6 @@ input,textarea,select{transition:border-color var(--t-fast) var(--ease),box-shad
 .ts-scalar span{font-family:var(--font-mono);font-size:11.5px;color:#1686ef}
 .ts-graphwrap.preview{max-height:150px;cursor:default}
 .ts-graphwrap.preview .ts-zoom{display:none}
-.ts-canvas-open{position:absolute;right:40px;top:14px;font-size:12px;padding:6px 12px;background:#eef6ff;color:#1686ef;border-radius:7px;font-weight:600}
-.ts-canvas-open:hover{background:#e2efff}
 .ts-zoom{display:flex;align-items:center;gap:8px;margin-bottom:10px}
 .ts-zoom button{font-size:12px;width:26px;height:24px;padding:0;background:#f5f5f5;color:#666;border-radius:6px}
 .ts-zoom button:hover{background:#ececec;color:#262626}
