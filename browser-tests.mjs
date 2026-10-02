@@ -139,7 +139,7 @@ try {
     await content.click();await page.keyboard.press('Control+a');
     await page.keyboard.insertText(before.replace('a + b','a - b'));
     await ui.locator('[data-left=tutor]').click();
-    await ui.locator('[data-tutor-question]').fill('请引导我检查两数求和的输出问题，不要直接给出完整答案�?);
+    await ui.locator('[data-tutor-question]').fill('请引导我检查两数求和的输出问题，不要直接给出完整答案�?);
     await ui.locator('[data-action=ask-tutor]').click();
     await ui.locator('.tutor-explanation,.tutor-error').first().waitFor({timeout:100000});
     assert.equal(await ui.locator('.tutor-error').count(),0,await ui.locator('.tutor-response').innerText());
@@ -153,7 +153,7 @@ try {
   }
   // Mock only external providers; Moodle navigation and judging above use the real site.
   let failAI=false,tutorMode='good',tutorContext,releaseTutor,holdPreview=false,releasePreview;
-  const tutorAnswer={explanation:'先对照输入和输出，再检�?*运算�?*。\n\n历史提交和当前代码可能不同，请分别判断�?,issues:[{startLine:6,endLine:6,severity:'warning',title:'检查运算表达式',problem:'这一行决定输出的计算方式�?,hint:'题目要求哪一种运算？',suggestion:'将表达式调整为两数相加�?,replacement:'printf("%d\\n", a + b);'}],nextSteps:['手算一组输入，再与程序对照�?]};
+  const tutorAnswer={explanation:'先对照输入和输出，再检�?*运算�?*。\n\n历史提交和当前代码可能不同，请分别判断�?,issues:[{startLine:6,endLine:6,severity:'warning',title:'检查运算表达式',problem:'这一行决定输出的计算方式�?,hint:'题目要求哪一种运算？',suggestion:'将表达式调整为两数相加�?,replacement:'printf("%d\\n", a + b);'}],nextSteps:['手算一组输入，再与程序对照�?]};
   await page.route(/^https:\/\/(?:workspace\.test|api\.siliconflow\.cn)\//,async route=>{
     const request=route.request();
     const headers={'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'content-type,authorization'};
@@ -171,7 +171,7 @@ try {
         if(tutorMode==='hold')await new Promise(resolve=>{releaseTutor=resolve;});
       }
       if(!isTutor&&holdPreview)await new Promise(resolve=>{releasePreview=resolve;});
-      const answer=isTutor?(tutorMode==='invalid'?'not json':JSON.stringify(tutorAnswer)):prompt.includes('只回�?OK')?'OK':prompt.includes('严格返回 JSON')?'{"tests":[{"input":"1 2\\n","expected":"3\\n"}]}':'/* AI preview */';
+      const answer=isTutor?(tutorMode==='invalid'?'not json':JSON.stringify(tutorAnswer)):prompt.includes('只回�?OK')?'OK':prompt.includes('严格返回 JSON')?'{"tests":[{"input":"1 2\\n","expected":"3\\n"}]}':'/* AI preview */';
       body={choices:[{message:{content:answer}}]};
     }
     await route.fulfill({status:200,headers,contentType:'application/json',body:JSON.stringify(body)});
@@ -210,7 +210,7 @@ try {
   report.mockAPIs='connection success/401, completion cancel/preview/apply/undo, generated case preview, custom runner passed';
   await ui.locator('[data-left=tutor]').click();
   if(await ui.locator('.tutor-composer:not([open])').count())await ui.locator('.tutor-composer summary').click();
-  await ui.locator('[data-tutor-question]').fill('请先引导，不要直接展示修改方法�?);
+  await ui.locator('[data-tutor-question]').fill('请先引导，不要直接展示修改方法�?);
   tutorMode='hold';
   await ui.locator('[data-action=ask-tutor]').click();
   await ui.locator('.tutor-response .ai-loading').waitFor();
@@ -229,7 +229,7 @@ try {
   assert.equal(await ui.locator('.fix-content').first().isVisible(),false);
   await shot('tutor');
   await ui.locator('[data-ai-line="0"]').click();
-  assert.ok((await ui.locator('[data-cursor]').innerText()).includes('�?6'));
+  assert.ok((await ui.locator('[data-cursor]').innerText()).includes('�?6'));
   assert.ok(await ui.locator('.ai-line-warning').count());
   await ui.locator('.tutor-fix summary').first().click();
   assert.equal(await ui.locator('.fix-content').first().isVisible(),true);

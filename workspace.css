@@ -42,7 +42,23 @@ a{color:#1683d8;text-decoration:none}a:hover{text-decoration:underline}h1,h2,h3,
 .tutor-issues{display:grid;gap:14px}.tutor-issue{border:1px solid #ececec;border-radius:8px;overflow:hidden;padding:14px}.tutor-issue header{display:flex;align-items:center;gap:8px}.tutor-issue header strong{font-size:12px;font-weight:600;flex:1}.tutor-issue header button{font:11px Consolas,monospace;color:#777;background:#f5f5f5;padding:4px 7px}.severity-dot{width:6px;height:6px;border-radius:50%;background:#9c8aba}.tutor-issue.error .severity-dot{background:#db7b70}.tutor-issue.warning .severity-dot{background:#d5aa54}.tutor-issue>p{font-size:12px;line-height:1.85;color:#777;margin:12px 0}.tutor-hint{font-size:11px;line-height:1.8;padding:10px 12px;background:#faf8fd;border-radius:5px;color:#847094}.tutor-hint span{display:block;font-weight:600;margin-bottom:3px}
 .tutor pre{font:11px/1.75 Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:#f7f7f8;padding:12px;border-radius:5px;max-height:350px;overflow:auto;color:#60616a}.tutor-json{font-size:11px;color:#999;margin-top:12px}.tutor-reveal summary{cursor:pointer;user-select:none}.tutor-json summary:hover{color:#71518c}.tutor-fix{border-top:1px solid #efefef;margin-top:13px;padding-top:12px}.tutor-fix summary{font-size:11px;color:#8b6aad;display:flex;align-items:center;gap:6px;list-style:none}.tutor-fix summary::-webkit-details-marker{display:none}.tutor-fix summary span{margin-left:auto;color:#bbb;font-size:10px}.tutor-fix[open] summary span{visibility:hidden}.fix-content{font-size:12px;color:#666;line-height:1.85;padding-top:12px}.fix-content p{margin-bottom:9px}
 .tutor-next{margin-top:24px}.tutor-next ol{padding-left:20px;font-size:12px;line-height:2;color:#777}.tutor-disclaimer{margin-top:24px;font-size:10px;color:#aaa}.tutor-welcome,.tutor-clear{color:#aaa;font-size:12px;line-height:1.9;padding:18px 0}.tutor-welcome strong{font-size:13px;color:#888;font-weight:500}.tutor-welcome p{margin-top:8px}.tutor-error{background:#fff8f7;border:1px solid #f3e3e0;border-radius:8px;padding:16px;font-size:12px;color:#a16a61;overflow-wrap:anywhere}.tutor-error p{margin:9px 0;line-height:1.8}.tutor-error span{font-size:11px;color:#ab918c}
-.cm-line.ai-line-error{background:#fff3ef!important;box-shadow:inset 2px 0 #d98e7e}.cm-line.ai-line-warning{background:#fffaeb!important;box-shadow:inset 2px 0 #d5b76e}.cm-line.ai-line-info{background:#f6f2fc!important;box-shadow:inset 2px 0 #aa8dca}
+/* Diagnostics never cover the code: a tinted line, a wavy underline and a coloured
+   line number, with the message in a hover card. */
+.cm-line.ai-line-error{background:#fff7f5!important;box-shadow:inset 2px 0 #e0a094}
+.cm-line.ai-line-warning{background:#fffdf5!important;box-shadow:inset 2px 0 #e2c483}
+.cm-line.ai-line-info{background:#faf8fd!important;box-shadow:inset 2px 0 #bda6d6}
+.cm-diag-squiggle{text-decoration-line:underline;text-decoration-style:wavy;text-decoration-skip-ink:none;text-underline-offset:3px}
+.cm-diag-squiggle.cm-diag-error{text-decoration-color:#d98e7e}
+.cm-diag-squiggle.cm-diag-warning{text-decoration-color:#d5b76e}
+.cm-diag-squiggle.cm-diag-info{text-decoration-color:#aa8dca}
+.diag-tip{max-width:420px;background:#fff;border:1px solid #e6e6e8;border-radius:8px;box-shadow:0 6px 22px #0000001a;padding:9px 11px;font-size:11.5px;line-height:1.75;color:#3f3f46}
+.diag-tip-row+.diag-tip-row{margin-top:8px;padding-top:8px;border-top:1px solid #f1f1f3}
+.diag-tip-row strong{display:block;color:#b3402f;font-size:12px;margin-bottom:3px}
+.diag-tip-row.warning strong{color:#9c7625}
+.diag-tip-row.info strong{color:#7a5fa8}
+.diag-tip-row p{margin:2px 0 0;font-family:var(--font-mono);font-size:10.5px;color:#8a8a90;overflow-wrap:anywhere}
+.diag-tip-row .diag-tip-hint{font-family:inherit;font-size:11px;color:#9b834e}
+.diag-tip-row .diag-tip-line{font-family:inherit;font-size:10px;color:#b8b8bd}
 .tutor-composer>summary{cursor:pointer;font-size:11px;color:#999;padding:6px 0 12px}.tutor-composer>summary span{float:right;color:#967aaa}.tutor-composer[open]>summary{margin-bottom:5px}.tutor-composer:not([open])+.tutor-actions{margin-top:3px}
 @media(max-width:700px){.tutor{padding:18px 16px}.tutor-heading h2{font-size:15px}.left .panel-head{gap:0;padding:0 4px}.left .panel-head button{font-size:11px;padding:5px}.left .panel-head button svg{width:14px}.tutor-actions>span{max-width:150px}}
 @keyframes fade{from{opacity:0}to{opacity:1}}@keyframes slide{from{transform:translateX(-15px);opacity:.5}to{transform:none;opacity:1}}

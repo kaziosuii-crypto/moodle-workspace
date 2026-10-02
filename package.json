@@ -1,7 +1,7 @@
 {
   "name": "moodle-workspace",
   "private": true,
-  "version": "6.0.56",
+  "version": "6.0.57",
   "scripts": {
     "build": "node build.mjs",
     "test": "node --test tests.mjs",

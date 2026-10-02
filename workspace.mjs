@@ -1,5 +1,5 @@
 import { EditorState, EditorSelection, StateEffect, StateField } from '@codemirror/state';
-import { EditorView, Decoration, WidgetType, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection } from '@codemirror/view';
+import { EditorView, Decoration, WidgetType, keymap, lineNumbers, hoverTooltip, highlightActiveLine, highlightActiveLineGutter, drawSelection } from '@codemirror/view';
 import { defaultKeymap, history as editorHistory, historyKeymap, indentWithTab, indentSelection } from '@codemirror/commands';
 import { cpp } from '@codemirror/lang-cpp';
 import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, indentOnInput, foldGutter, foldKeymap } from '@codemirror/language';
@@ -189,11 +189,12 @@ function syncDiagnosis() {
   renderInlineDiagnosis();
 }
 function renderInlineDiagnosis() {
+  // Deliberately empty: diagnostics are a squiggle, a coloured line number and a hover
+  // card. The old overlay chips sat under the line and covered whatever came next.
   const layer=$('[data-ai-layer]');
-  if(!layer||!editor)return;
-  layer.replaceChildren();
-  const issues=activeIssues();
-  if(!issues.length){layer.classList.add('hidden');return;}
+  if(layer){if(layer.childElementCount)layer.replaceChildren();layer.classList.add('hidden');}
+  if(!editor)return;
+  const issues=[];if(!issues.length)return;
   const box=editor.dom.getBoundingClientRect(),used=[];
   issues.forEach(issue=>{
     const index=issue.key;
@@ -224,19 +225,50 @@ function renderInlineDiagnosis() {
   });
   layer.classList.toggle('hidden',!layer.children.length);
 }
-const diagnosisField=StateField.define({
-  create:()=>Decoration.none,
+/**
+ * The diagnostics the editor is showing, kept as plain records.
+ *
+ * Everything else - the line tint, the squiggle, the gutter colour and the hover card -
+ * is derived from this. The messages used to be drawn as chips pinned under the line,
+ * where they covered the code below; a squiggle you can hover does the same job without
+ * hiding anything.
+ */
+const diagnosisIssues=StateField.define({
+  create:()=>[],
   update(value,tr) {
-    if(tr.docChanged){expandedIssues.clear();return Decoration.none;}
-    for(const effect of tr.effects)if(effect.is(diagnosisEffect)){
-      const lines=new Map();
-      for(const issue of effect.value)if(issue.startLine)for(let n=issue.startLine;n<=issue.endLine;n++)lines.set(n,issue.severity);
-      return Decoration.set([...lines].sort((a,b)=>a[0]-b[0]).map(([n,severity])=>Decoration.line({class:`ai-line ai-line-${severity}`}).range(tr.state.doc.line(Math.min(n,tr.state.doc.lines)).from)));
-    }
+    if(tr.docChanged){expandedIssues.clear();return [];}
+    for(const effect of tr.effects)if(effect.is(diagnosisEffect))return effect.value;
     return value;
-  },
-  provide:field=>EditorView.decorations.from(field)
+  }
 });
+const byLine=issues=>{
+  const lines=new Map();
+  for(const issue of issues)if(issue.startLine)lines.set(issue.startLine,issue);
+  return lines;
+};
+const diagnosisDecorations=EditorView.decorations.compute(['doc',diagnosisIssues],state=>{
+  const decos=[];
+  for(const [n,issue] of byLine(state.field(diagnosisIssues))){
+    const line=state.doc.line(Math.min(n,state.doc.lines));
+    decos.push(Decoration.line({class:'ai-line ai-line-'+issue.severity}).range(line.from));
+    if(line.length)decos.push(Decoration.mark({class:'cm-diag-squiggle cm-diag-'+(issue.severity||'error')}).range(line.from,line.to));
+  }
+  return Decoration.set(decos,true);
+});
+
+const diagnosisHover=hoverTooltip((view,pos)=>{
+  const line=view.state.doc.lineAt(pos);
+  const issue=byLine(view.state.field(diagnosisIssues)).get(line.number);
+  if(!issue)return null;
+  return {pos:line.from,end:line.to,above:true,create(){
+    const dom=document.createElement('div');
+    dom.className='diag-tip';
+    dom.innerHTML='<div class="diag-tip-row '+(issue.severity||'error')+'"><strong>'+esc(issue.title||'编译器提示')+'</strong>'+
+      (issue.problem?'<p>'+esc(issue.problem)+'</p>':'')+(issue.hint?'<p class="diag-tip-hint">'+esc(issue.hint)+'</p>':'')+
+      (issue.startLine?'<p class="diag-tip-line">第 '+issue.startLine+' 行</p>':'')+'</div>';
+    return {dom};
+  }};
+},{hoverTime:140});
 function motion(targets,options={}) {
   const nodes=Array.from(targets?.nodeType?[targets]:targets||[]).filter(Boolean);
   if(!nodes.length || reducedMotion.matches)return null;
@@ -565,7 +597,7 @@ function editorState(value) {
   return EditorState.create({ doc:joinPreset(value), extensions:[
     lineNumbers(),highlightActiveLine(),highlightActiveLineGutter(),drawSelection(),editorHistory(),cpp(),
     presetLock,presetMarks,
-    diagnosisField,ghostField,
+    diagnosisIssues,diagnosisDecorations,diagnosisHover,ghostField,
     syntaxHighlighting(defaultHighlightStyle),indentOnInput(),bracketMatching(),closeBrackets(),foldGutter(),
     highlightSelectionMatches(),EditorView.lineWrapping,
     autocompletion({ override:[completeFromList(words.map(label=>({label,type:['printf','scanf','strlen','main'].includes(label)?'function':'keyword'})))] }),
