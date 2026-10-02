@@ -3,12 +3,26 @@ import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
 import { readFileSync } from 'node:fs';
 import { cleanSuggestion, copilotPrompt, copilotWorthAsking } from './copilot.mjs';
-import { skippedSteps, declarationsIn } from './trace.mjs';
+import { skippedSteps, declarationsIn, instrument } from './trace.mjs';
 import { ioText, richContent, formatTime, parseProblem, parseNavigation, parseResult, safeURL } from './adapter.mjs';
 import { parseTutorResponse, tutorNarrative, tutorPrompt } from './tutor.mjs';
 const base='http://example.test/moodle/mod/programming/view.php?a=117';
 const doc=html=>parseHTML(`<html><body>${html}</body></html>`).document;
 const io=value=>`<ol><li>${value}↵</li></ol>`;
+
+test('插桩后的行号能映射回用户自己的行',()=>{
+  // The trace compiles the instrumented copy, so a compiler warning would otherwise
+  // point at a line the editor does not have - or at one of our own helpers.
+  const source=['int main(void) {','    int a = 3;','    printf("%d\\n", a);','    return 0;','}'].join('\n');
+  const {source:instrumented,lineMap}=instrument(source);
+  const lines=instrumented.split('\n');
+  const at=lines.findIndex(line=>/^    int a = 3;$/.test(line));
+  assert.equal(lineMap[at+1],2,'the statement maps to its own line');
+  const marker=lines.findIndex(line=>line.includes('__WS_STEP__'));
+  assert.equal(lineMap[marker+1],2,'the marker before it maps there too');
+  assert.equal(lineMap[1],0,'our own header is not the user\'s line 1');
+  assert.equal(lineMap[lineMap.length-1],0,'nothing after the body maps anywhere');
+});
 
 test('Moodle I/O preserves spaces and trailing newline, excludes download controls',()=>{
   assert.equal(ioText(doc(`<div><a>下载</a><ol><li>1&nbsp;2↵</li><li>&nbsp;3↵</li></ol></div>`).querySelector('div')),'1 2\n 3\n');

@@ -527,6 +527,37 @@ function compilePanel(message) {
     '<details class="tutor-json tutor-reveal"><summary>编译器原始输出</summary><pre>'+esc(message)+'</pre></details>'+
     '<div class="result-assist">'+button('explain-error','AI 讲讲这几个错','ai','purple')+'</div></div>';
 }
+/**
+ * Warnings from a build that still produced a module.
+ *
+ * A failed build already gets the full panel; a successful one used to show nothing at
+ * all, which is how "scanf("%d", a)" ran to completion looking perfectly normal.
+ */
+function compileWarnings(){return (current?.compileIssues||[]).filter(i=>i.severity==='warning');}
+/** One compiler diagnostic, as a card the editor can jump to. */
+function issueCardsHTML(issues){
+  return issues.map(issue=>'<article class="compile-issue '+issue.severity+'"><header><span class="severity-dot"></span><strong>'+esc(issue.title)+
+    '</strong><button data-compile-line="'+issue.startLine+'">L'+issue.startLine+'</button></header><p>'+esc(issue.problem)+'</p>'+
+    (issue.hint?'<div class="tutor-hint"><span>怎么改</span>'+esc(issue.hint)+'</div>':'')+'</article>').join('');
+}
+function compileWarnHTML(){
+  const issues=compileWarnings();
+  if(!issues.length)return '';
+  return '<div class="compile-warnings"><div class="section-kicker">编译器警告 <span>'+issues.length+'</span><small>不影响运行，但通常正是 bug 的起点</small></div>'+
+    issueCardsHTML(issues)+'</div>';
+}
+/**
+ * The trace player has one line to spare, not a panel.
+ *
+ * The summary stays visible so a warning is never silently hidden behind the animation,
+ * and the cards open on demand so the player is not pushed out of view.
+ */
+function compileWarnStrip(){
+  const issues=compileWarnings();
+  if(!issues.length)return '';
+  return '<details class="compile-warn-strip"><summary><span class="severity-dot"></span><b>编译器警告 '+issues.length+' 条</b><small>'+
+    esc(issues[0].title)+(issues.length>1?' 等':'')+'</small></summary><div class="compile-issues">'+issueCardsHTML(issues)+'</div></details>';
+}
 function renderResults() {
   stopWithin($('[data-bottom-body]'));
   const r=current.result;
@@ -541,6 +572,7 @@ function renderResults() {
   $('[data-bottom-body]').innerHTML=`<section class="results">
     <div class="result-title ${good?'green':r.pending?'muted':'red'}">${good?'通过':r.compile?'编译错误':r.pending?'判题中':r.total?'未通过':'暂无结果'}<small>${r.total?`${r.passed} / ${r.total} 个用例通过`:esc(r.message)}</small></div>
     ${r.source==='previous'?'<p class="result-warning">以下为此前提交的结果，不能代表当前编辑器中的代码。</p>':''}
+    ${compileWarnHTML()}
     <div class="result-assist">${button('tutor-diagnose','分析这次结果','ai','purple')}</div>
     ${r.submitId?`<div class="submission-id">提交 #${esc(r.submitId)}</div>`:''}
     ${r.rows.length?`<div class="table-wrap"><table class="results-table"><thead><tr><th>用例</th><th>状态</th><th>用时 / 秒</th><th>内存</th></tr></thead><tbody>${r.rows.map((row,i)=>`<tr tabindex="0" data-result="${i}" class="${i===resultIndex?'selected':''}"><td>${esc(row.no)}</td><td class="${row.passed?'green':'red'}">${esc(row.verdict)}</td><td>${esc(row.time)}</td><td>${esc(row.memory)}</td></tr>`).join('')}</tbody></table></div>`:''}
@@ -1139,11 +1171,16 @@ function traceValue(v,raw){
 function traceVarHTML(v,changeArg){
   // Callers may pass a boolean; only an object carries the previous value.
   const change=changeArg&&typeof changeArg==='object'?changeArg:null;
-  const cls='trace-var'+(changeArg?' changed':'');
-  const body=change
-    ?'<span class="reel"><span class="reel-old">'+esc(traceValue(v,change.from))+'</span>'+
-      '<span class="reel-new">'+esc(traceValue(v,v.value))+'</span></span>'
-    :'<span>'+esc(traceValue(v,v.value))+'</span>';
+  const flag=v.wild?'wild':v.freed?'freed':'';
+  const cls='trace-var'+(changeArg?' changed':'')+(flag?' '+flag:'');
+  // An uninitialised pointer holds a number the program never chose, so its address is
+  // noise; a freed one keeps a real address, and seeing it is what explains the crash.
+  const body=v.wild
+    ?'<span class="trace-flag">未初始化</span>'
+    :(change
+      ?'<span class="reel"><span class="reel-old">'+esc(traceValue(v,change.from))+'</span>'+
+        '<span class="reel-new">'+esc(traceValue(v,v.value))+'</span></span>'
+      :'<span>'+esc(traceValue(v,v.value))+'</span>')+(v.freed?'<span class="trace-flag freed">已释放</span>':'');
   return '<span class="'+cls+'"><b>'+esc(v.name)+'</b>'+body+'</span>';
 }
 /** Split "arr[0]=4 i=2" into scalars plus arrays keyed by name. */
@@ -1266,6 +1303,10 @@ const CY_STYLE=[
   {selector:'node[kind="var"]',style:{'background-color':'#f5f6f8','border-color':'#e2e2e4','color':'#3f3f46',
     'width':104,'height':30,'font-size':12}},
   {selector:'node[kind="ptr"][moved="1"]',style:{'background-color':'#fff4e0','border-color':'#f0d29b','color':'#9c7625'}},
+  // After "moved", so the state is what the box says last: a pointer the program never
+  // gave a value to, or one whose memory was handed back, is the whole point of the step.
+  {selector:'node[kind="ptr"][state="wild"]',style:{'background-color':'#fff8ec','border-color':'#f0dcae','color':'#8a6a1f','height':44}},
+  {selector:'node[kind="ptr"][state="freed"]',style:{'background-color':'#fdf0ee','border-color':'#f0cdc6','color':'#a4503c','height':44}},
   {selector:'edge',style:{'width':1.6,'line-color':'#1686ef','target-arrow-color':'#1686ef',
     'target-arrow-shape':'triangle','curve-style':'bezier','arrow-scale':.85,'font-size':10,
     'font-family':'Consolas, monospace','color':'#9aa0a6','text-background-color':'#fff','text-background-opacity':.85,'text-background-padding':2}},
@@ -1359,7 +1400,8 @@ function cyElements(spot){
       continue;
     }
     const id='p:'+v.name;
-    nodes.push({data:{id,kind:'ptr',label:v.name,moved:prev.get(v.name)!==v.value?'1':'0'}});
+    const flag=v.wild?'未初始化':v.freed?'已释放':'';
+    nodes.push({data:{id,kind:'ptr',label:flag?v.name+'\n'+flag:v.name,state:v.wild?'wild':v.freed?'freed':'',moved:prev.get(v.name)!==v.value?'1':'0'}});
     if(live.has(v.value))edges.push({data:{id:'e:'+id,source:id,target:'n:'+v.value,kind:'ptr'}});
   }
   return [...nodes,...edges];
@@ -1626,7 +1668,7 @@ function graphHTML(nodes,prev,options){
     let at=pos.get('p:'+v.name);
     if(!at&&!byAddr.has(v.value)){at={x:8+(lost++)*96,y:height-30};}
     if(!at)return;
-    chips+='<div class="ts-ptr'+(moved?' moved':'')+'" style="left:'+at.x+'px;top:'+at.y+'px;width:'+CW+'px;height:'+CH+'px">'+esc(v.name)+'</div>';
+    chips+='<div class="ts-ptr'+(moved?' moved':'')+(v.wild?' wild':'')+(v.freed?' freed':'')+'" style="left:'+at.x+'px;top:'+at.y+'px;width:'+CW+'px;height:'+CH+'px">'+esc(v.name)+'</div>';
     const target=pos.get(v.value);
     if(target){
       const ax=at.x+CW/2,ay=at.y+CH/2,bx=target.x+W/2,by=target.y+H/2,dx=bx-ax,dy=by-ay;
@@ -1634,7 +1676,12 @@ function graphHTML(nodes,prev,options){
       const t1=cut(CW/2+6,CH/2+6),t2=cut(W/2+11,H/2+11);
       chipsEdges+='<path class="ts-edge ptr'+(moved?' new':'')+'" marker-end="url(#ts-head)" d="M'+(ax+dx*t1).toFixed(1)+' '+(ay+dy*t1).toFixed(1)+' L'+(bx-dx*t2).toFixed(1)+' '+(by-dy*t2).toFixed(1)+'"/>';
     }
-    else chipsEdges+='<text class="ts-null" x="'+(at.x+CW/2)+'" y="'+(at.y+CH+14)+'">→ ?</text>';
+    else{
+      // No node was captured at this address: either it is not part of what this step
+      // shows, or the pointer is the reason - say which when the trace knows.
+      const why=v.wild?'未初始化':v.freed?'已释放':'→ ?';
+      chipsEdges+='<text class="ts-null'+(v.wild?' wild':'')+(v.freed?' freed':'')+'" x="'+(at.x+CW/2)+'" y="'+(at.y+CH+14)+'">'+esc(why)+'</text>';
+    }
   });
   if(lost)height+=34;
   // Which directed links exist, so a pair pointing at each other can be told apart.
@@ -1866,7 +1913,7 @@ function renderTrace(){
   if(!host)return;
   if(!trace){replaceContent(host,'<div class="empty">'+icon('run')+'点「单步」把这段代码的执行过程演一遍。</div>');return;}
   if(trace.status==='loading'){replaceContent(host,loadingHTML(trace.message||'正在编译并记录执行过程','记录完成后可以逐步播放，也可以自动播放。'));animateLoading(host);return;}
-  if(trace.status==='error'){replaceContent(host,'<div class="results"><div class="result-title red">无法记录执行过程<small></small></div><div class="result-detail"><pre>'+esc(trace.error)+'</pre></div></div>');return;}
+  if(trace.status==='error'){replaceContent(host,'<div class="results"><div class="result-title red">无法记录执行过程<small></small></div>'+compileWarnStrip()+'<div class="result-detail"><pre>'+esc(trace.error)+'</pre></div></div>');return;}
   const spot=traceSpot();
   if(!spot)return;
   const step=spot.step;
@@ -1886,6 +1933,7 @@ function renderTrace(){
       '<span class="trace-count">'+esc(traceLabel())+(trace.skip&&trace.skip.length?' · '+esc(skipBadge(trace.skip)):'')+'</span>'+
     '</div>'+
     '<div class="trace-progress"><span style="width:'+pct+'%"></span></div>'+
+    compileWarnStrip()+
     '<div class="trace-vars">'+(compactVars.scalars.length
       ? compactVars.scalars.map(v=>traceVarHTML(v,compactChanges.find(c=>c.name===v.name))).join('')
       : (compactVars.arrays.size?'':'<span class="trace-none">这一步还没有可见的变量</span>'))+'</div>'+
@@ -1901,7 +1949,7 @@ function renderTrace(){
 }
 async function startTrace(){
   if(busy)return;
-  const {source,count}=instrument(code());
+  const {source,count,lineMap}=instrument(code());
   if(!count){toast('这段代码里没有识别到可以逐行执行的语句。');return;}
   const input=current.draft.tests[testIndex]?.input ?? current.draft.tests[0]?.input ?? '';
   traceStop();
@@ -1910,7 +1958,9 @@ async function startTrace(){
   current.trace={status:'loading',message:'正在编译并记录执行过程',mode:keep.mode||'skip',speed:keep.speed??5,fullscreen:!!keep.fullscreen};
   renderTrace();
   try{
-    const module=await compileC(source,message=>{current.trace={status:'loading',message};renderTrace();});
+    const {module,warnings}=await compileC(source,message=>{current.trace={status:'loading',message};renderTrace();});
+    // The traced copy carries the mapping back to the editor's own line numbers.
+    current.compileIssues=parseCompileIssues(warnings,lineMap);syncDiagnosis();
     const {stdout}=await runCModule(module,input);
     const {steps,finalOutput}=parseTrace(stdout);
     if(!steps.length)throw new Error('没有记录到任何执行步骤，代码可能一进入就退出了。');
@@ -1923,15 +1973,19 @@ async function startTrace(){
     current.trace={status:'error',error:error.timeout
       ? '代码执行超过 6 秒仍未结束，很可能陷入了死循环。已强制中断，工作区没有卡住。'
       : error.message};
+    current.compileIssues=parseCompileIssues(error.message,lineMap);syncDiagnosis();
   }finally{setBusy(false);}
   renderTrace();
 }
 async function compileC(source,onProgress){
   const {compile}=await loadToolchain(onProgress);
   onProgress?.('正在编译…');
-  const {module,compileOutput}=await compile({source,fileName:'main.c',flags:['-O0']});
+  // -Wall, deliberately without -Werror: a warning must never stop code from running.
+  const {module,compileOutput}=await compile({source,fileName:'main.c',flags:['-O0','-Wall']});
   if(!module)throw new Error((compileOutput||'编译失败').trim().slice(0,4000));
-  return module;
+  // Warnings used to be thrown away the moment a module came back, which is exactly how
+  // a missing "&" in scanf stayed invisible: it compiles clean and only warns.
+  return {module,warnings:compileOutput||''};
 }
 /**
  * Execution sandbox.
@@ -2136,6 +2190,8 @@ async function runTests() {
     const tests=structuredClone(current.draft.tests),submittedSource=code();
     current.result={rows:[],total:0,passed:0,pending:true,message:prefs.runner?'正在运行自定义测试…':'正在用在线编译器运行…'};switchBottom('results');
     let results;
+    // Declared out here because the warnings are shown next to the results, not here.
+    let compileWarnings='';
     if(prefs.runner){
       const response=await fetch(prefs.runner,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:submittedSource,language:$('[data-language]').selectedOptions[0].textContent,tests}),signal:AbortSignal.timeout(45000)});
       if(!response.ok)throw new Error(`执行 API 返回 ${response.status}`);
@@ -2146,7 +2202,7 @@ async function runTests() {
       // Local WASM compiler first; fall back to the online playground if it cannot load.
       const onProgress=message=>{current.result={rows:[],total:0,pending:true,message};switchBottom('results');};
       let module=null;
-      try{ module=await compileC(submittedSource,onProgress); }
+      try{ ({module,warnings:compileWarnings}=await compileC(submittedSource,onProgress)); }
       catch(error){
         // "main.c:3:5: error: ..." is the user's code failing to compile, not a
         // missing toolchain, so it must reach the compiler-diagnostics panel.
@@ -2176,7 +2232,8 @@ async function runTests() {
     // local runner compares exactly the same way instead of trimming whitespace.
     const rows=results.map((r,i)=>{const actual=String(r.stdout??'');const passed=actual===tests[i].expected&&!r.stderr;return{no:String(i+1),input:tests[i].input,expected:tests[i].expected,actual,error:String(r.stderr||''),passed,verdict:passed?'AC: 通过':'WA: 输出不一致',time:r.time??'-',memory:r.memory??'-',weight:'-',limit:'-',memoryLimit:'-',exit:r.exitCode??'-'};});
     current.result={rows,total:rows.length,passed:rows.filter(r=>r.passed).length,source:'custom',submittedCode:submittedSource};
-    current.compileIssues=parseCompileIssues(results.map(r=>String(r.stderr||'')).join('\n'));
+    // Warnings from the build come first: they are about the code, not about a case.
+    current.compileIssues=parseCompileIssues([compileWarnings].concat(results.map(r=>String(r.stderr||''))).join('\n'));
     switchBottom('results');syncDiagnosis();
   } catch(error){
     current.compileIssues=parseCompileIssues(error.message);

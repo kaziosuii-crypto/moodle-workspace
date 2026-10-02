@@ -14,7 +14,10 @@
  * printing it.
  */
 const MARK = '__WS_STEP__';
-const MARK_PREFIXES = [MARK, '__WS_CALL__', '__WS_RET__', '__WS_NODE__', '__WS_READ__'];
+const MARK_KINDS = ['STEP', 'CALL', 'RET', 'READ', 'NODE', 'FLAG'];
+const MARK_PREFIXES = MARK_KINDS.map(kind => '__WS_' + kind + '__');
+/** Markers share stdout with the program, so this both finds and separates them. */
+const MARK_SPLIT = new RegExp('(__WS_(?:' + MARK_KINDS.join('|') + ')__[^\\n]*)', 'g');
 const STEP_CAP = 20000;
 
 /** Format specifier and rendering kind for a declaration specifier list. */
@@ -188,7 +191,12 @@ function marker(line, scope) {
   const fields = [];
   for (const variable of scope) fields.push(...fieldsOf(variable));
   const format = [MARK + '%d'].concat(fields.map(f => f.kind + ':' + f.label + '=' + f.fmt)).join('|');
-  const args = [String(line)].concat(fields.map(f => f.expr));
+  // A pointer is read through its guard: reading one that the program never gave a value
+  // to is undefined behaviour, and the compiler is right to warn about it. The guard is
+  // in scope for every marker inside a function, which is the only place they exist.
+  const args = [String(line)].concat(fields.map(f => f.kind === 'p'
+    ? '(__ws_def_' + f.label + '?(void*)' + f.label + ':(void*)0)'
+    : f.expr));
   return 'if(__ws_steps++<' + STEP_CAP + ')printf("' + format + '\\n",' + args.join(',') + ');';
 }
 
@@ -268,6 +276,8 @@ function walkerSource(structs) {
     // "next" would crash a program that runs fine without instrumentation.
     out += '  int __ws_i;\n';
     out += '  if(!__ws_p || __ws_d > 64 || __ws_steps > ' + STEP_CAP + ')return;\n';
+    // Memory that has been handed back is not the node it used to be.
+    out += '  if(__ws_freed_has((void*)__ws_p))return;\n';
     // A node already visited on this walk means a cycle; a target that was never
     // seen as a pointer value is not followed at all, so an uninitialised link
     // can never be dereferenced.
@@ -348,6 +358,14 @@ export function instrument(source) {
     return { ...variable, dims: known, size: known.length === 1 ? Math.min(known[0], 8) : 0 };
   };
   const out = [];
+  /**
+   * Instrumented line -> the line of the user's file it came from, 0 for generated.
+   *
+   * The trace compiles the instrumented source, so a compiler warning would otherwise
+   * point at a line number the editor does not have — or at one of our own helpers.
+   */
+  const lineMap = [0];
+  const add = (text, at) => { out.push(text); lineMap.push(at || 0); };
   const scopes = [[]];
   /**
    * The per-step snippet that remembers and draws every struct pointer in scope.
@@ -358,9 +376,16 @@ export function instrument(source) {
    * walking that would dereference garbage.
    */
   const walkCode = scope => {
-    const pointers = scope.filter(v => v.kind === 'p' && walkable.has(v.struct));
-    if (!pointers.length) return '';
-    return '__ws_seen_n=0;' + pointers.map(v =>
+    const all = scope.filter(v => v.kind === 'p');
+    if (!all.length) return '';
+    // A pointer with its guard down holds whatever the stack had there — a number the
+    // program never chose. Naming that beats printing it as if it were an address.
+    const flags = all.map(v =>
+      'if(__ws_def_' + v.name + '){if(__ws_freed_has((void*)' + v.name + '))printf("__WS_FLAG__f:' + v.name + '=1\\n");}' +
+      'else printf("__WS_FLAG__w:' + v.name + '=1\\n");').join('');
+    const here = all.filter(v => walkable.has(v.struct));
+    if (!here.length) return flags;
+    return flags + '__ws_seen_n=0;' + here.map(v =>
       'if(__ws_def_' + v.name + '){__ws_known_add((void*)' + v.name + ');__ws_walk_' + v.struct + '(' + v.name + ',0);}').join('');
   };
   let count = 0;
@@ -375,7 +400,7 @@ export function instrument(source) {
   // How deep inside a multi-line initialiser the previous line left us.
   let initDepth = 0;
   /** Open a function's body scope, declare its parameters, and announce the call. */
-  const enterFunction = (fn, headIndent) => {
+  const enterFunction = (fn, headIndent, at) => {
     functionBase = braceDepth;
     // The stars belong to the return type, and a pointer return has no safe printf
     // format, so only its exit is marked.
@@ -390,12 +415,12 @@ export function instrument(source) {
     }
     const scope = scopes[scopes.length - 1];
     // A parameter always holds a value the caller supplied, so its guard starts up.
-    for (const variable of scope) if (variable.kind === 'p') out.push(headIndent + '  int __ws_def_' + variable.name + '=1;');
+    for (const variable of scope) if (variable.kind === 'p') add(headIndent + '  int __ws_def_' + variable.name + '=1;', at);
     // fieldsOf, not the variable itself: a pointer has no fmt of its own, and that
     // undefined format is what a pointer parameter used to put straight into printf.
     const fields = scope.flatMap(v => fieldsOf(v));
-    out.push(headIndent + '  printf("__WS_CALL__%s' + (fields.length ? '|' + fields.map(f => f.kind + ':' + f.label + '=' + f.fmt).join('|') : '') + '\\n","' + fn[3] + '"' +
-      (fields.length ? ',' + fields.map(f => f.expr).join(',') : '') + ');');
+    add(headIndent + '  printf("__WS_CALL__%s' + (fields.length ? '|' + fields.map(f => f.kind + ':' + f.label + '=' + f.fmt).join('|') : '') + '\\n","' + fn[3] + '"' +
+      (fields.length ? ',' + fields.map(f => f.expr).join(',') : '') + ');', at);
   };
   let currentFunction = null;
   // Instrumentation is only valid inside a function body. A struct / union / enum
@@ -411,7 +436,7 @@ export function instrument(source) {
     // initDepth is the depth the previous line left behind: a row of a multi-line
     // initialiser must never get a marker, or the braces it sits between stop balancing.
     if (functionBase !== null && boundary && !SKIP(body) && !unbracedHead && initDepth === 0) {
-      out.push(indent + marker(i + 1, visible(scopes)));
+      add(indent + marker(i + 1, visible(scopes)), i + 1);
       count++;
       // Reads are recorded separately so the UI can light up the exact array cell.
       const inScope = new Set(visible(scopes).map(v => v.name));
@@ -425,25 +450,25 @@ export function instrument(source) {
           // "for (int i = 0; i < n; i++) sum += a[i];" - i is not in scope until the
           // loop starts, so recording this read here would not even compile.
           if ((index.match(/[A-Za-z_]\w*/g) || []).some(n => !inScope.has(n))) continue;
-          out.push(indent + 'printf("__WS_READ__%s|%d\\n","' + variable.name + '",(' + index + '));');
+          add(indent + 'printf("__WS_READ__%s|%d\\n","' + variable.name + '",(' + index + '));', i + 1);
         }
       }
       const walks=walkCode(visible(scopes));
-      if(walks)out.push(indent + walks);
+      if(walks)add(indent + walks, i + 1);
       if (currentFunction && currentFunction.ret && /^return\b/.test(body)) {
         const value = body.replace(/^return\b/, '').replace(/;\s*$/, '').trim();
         if (value) {
-          out.push(indent + 'printf("__WS_RET__%s|ret=' + currentFunction.ret.fmt + '\\n","' + currentFunction.name + '",(' + value + '));');
+          add(indent + 'printf("__WS_RET__%s|ret=' + currentFunction.ret.fmt + '\\n","' + currentFunction.name + '",(' + value + '));', i + 1);
         }
       } else if (currentFunction && !currentFunction.ret && /^return\b/.test(body)) {
-        out.push(indent + 'printf("__WS_RET__%s\\n","' + currentFunction.name + '");');
+        add(indent + 'printf("__WS_RET__%s\\n","' + currentFunction.name + '");', i + 1);
       }
     } else if (functionBase !== null && unbracedHead && !SKIP(body) && /;\s*$/.test(body)) {
       // These wrapper braces are this statement's scope, which is where a counter
       // declared by the loop head has to live.
       const scope = scopes[scopes.length - 1];
       for (const variable of pendingFor) scope.push(variable);
-      out.push(indent + '{ ' + marker(i + 1, visible(scopes)) + ' ' + body + ' }');
+      add(indent + '{ ' + marker(i + 1, visible(scopes)) + ' ' + body + ' }', i + 1);
       count++;
       for (const variable of pendingFor) scope.pop();
       pendingFor = [];
@@ -470,19 +495,28 @@ export function instrument(source) {
         }
       }
     }
-    out.push(emit);
+    add(emit, i + 1);
     // Shadow state for the guard above: raised the moment the pointer is known to
     // hold something the program put there. A declarator without an initialiser
     // starts lowered, and any later assignment raises it.
     if (functionBase !== null) {
       const declared = structPtrVars(body);
       if (declared.length) {
-        for (const variable of declared) out.push(indent + 'int __ws_def_' + variable.name + '=' + (variable.init ? 1 : 0) + ';');
+        for (const variable of declared) add(indent + 'int __ws_def_' + variable.name + '=' + (variable.init ? 1 : 0) + ';', i + 1);
       } else {
         for (const variable of visible(scopes).filter(v => v.kind === 'p')) {
           const assigned = new RegExp('(?:^|[;{}(,]\\s*)' + variable.name + '\\s*=(?!=)');
-          if (assigned.test(body)) out.push(indent + '__ws_def_' + variable.name + '=1;');
+          // A fresh value can be the allocator handing the same address back, so the
+          // "this was freed" label has to be dropped the moment the pointer is reassigned.
+          if (assigned.test(body)) add(indent + '__ws_def_' + variable.name + '=1;__ws_freed_del((void*)' + variable.name + ');', i + 1);
         }
+      }
+      // free(p) leaves p aimed at memory the allocator may hand out again. The walker
+      // refuses to enter a freed address, and the UI names that instead of drawing the
+      // stale contents as if they were still the node.
+      for (const call of body.match(/\bfree\s*\(\s*[A-Za-z_]\w*\s*\)/g) || []) {
+        const name = /\bfree\s*\(\s*([A-Za-z_]\w*)\s*\)/.exec(call)[1];
+        if (visible(scopes).some(v => v.kind === 'p' && v.name === name)) add('__ws_freed_add((void*)' + name + ');', i + 1);
       }
     }
     // An initialiser such as "= {1, 2, 3}" carries braces that are not a scope
@@ -519,9 +553,9 @@ export function instrument(source) {
     // that brace arrives; treating it as file scope instead left the whole body with no
     // markers at all, which is exactly the "no statements to step through" report.
     const sameLineHead = isFunctionHead ? body.match(FUNCTION) : null;
-    if (sameLineHead) enterFunction(sameLineHead, indent);
-    else if (pendingHead) { if (opens > 0) enterFunction(pendingHead.fn, pendingHead.indent); pendingHead = null; }
-    else if (braceDepth === 0 && opens === 0 && /[)]\s*$/.test(body) && FUNCTION.test(body)) pendingHead = { fn: body.match(FUNCTION), indent };
+    if (sameLineHead) enterFunction(sameLineHead, indent, i + 1);
+    else if (pendingHead) { if (opens > 0) enterFunction(pendingHead.fn, pendingHead.indent, pendingHead.line); pendingHead = null; }
+    else if (braceDepth === 0 && opens === 0 && /[)]\s*$/.test(body) && FUNCTION.test(body)) pendingHead = { fn: body.match(FUNCTION), indent, line: i + 1 };
     // A counter parked for a body that never arrived would leak into whatever block is
     // emitted next; dropping it is the safe direction.
     if (pendingFor.length && pendingForSet !== i) { pendingFor = []; pendingForSet = -1; }
@@ -562,11 +596,23 @@ export function instrument(source) {
     'static void __ws_known_add(void* __ws_p){int __ws_i;if(!__ws_p)return;for(__ws_i=0;__ws_i<__ws_known_n;__ws_i++)if(__ws_known[__ws_i]==__ws_p)return;if(__ws_known_n<1024)__ws_known[__ws_known_n++]=__ws_p;}',
     'static int __ws_known_has(void* __ws_p){int __ws_i;if(!__ws_p)return 0;for(__ws_i=0;__ws_i<__ws_known_n;__ws_i++)if(__ws_known[__ws_i]==__ws_p)return 1;return 0;}',
     'static void* __ws_seen[128];',
-    'static int __ws_seen_n=0;'
+    'static int __ws_seen_n=0;',
+    'static void* __ws_freed[256];',
+    'static int __ws_freed_n=0;',
+    'static void __ws_freed_add(void* __ws_p){int __ws_i;if(!__ws_p)return;for(__ws_i=0;__ws_i<__ws_freed_n;__ws_i++)if(__ws_freed[__ws_i]==__ws_p)return;if(__ws_freed_n<256)__ws_freed[__ws_freed_n++]=__ws_p;}',
+    'static void __ws_freed_del(void* __ws_p){int __ws_i;if(!__ws_p)return;for(__ws_i=0;__ws_i<__ws_freed_n;__ws_i++)if(__ws_freed[__ws_i]==__ws_p){__ws_freed[__ws_i]=__ws_freed[--__ws_freed_n];return;}}',
+    'static int __ws_freed_has(void* __ws_p){int __ws_i;if(!__ws_p)return 0;for(__ws_i=0;__ws_i<__ws_freed_n;__ws_i++)if(__ws_freed[__ws_i]==__ws_p)return 1;return 0;}'
   ].join('\n');
   const prologue = names.map(n => 'struct ' + n + ';').join('\n') + '\n' + helpers + '\n' +
     names.map(n => 'static void __ws_walk_' + n + '(struct ' + n + '*, int);').join('\n');
-  return { source: '#include <stdio.h>\nstatic int __ws_steps=0;\n' + prologue + '\n' + body + '\n' + walkers, count };
+  const head = '#include <stdio.h>\nstatic int __ws_steps=0;\n' + prologue + '\n';
+  const headLines = head.split('\n').length - 1;
+  const output = head + body + '\n' + walkers;
+  // Padded to the whole file so a diagnostic on any line can be looked up without a
+  // bounds check; generated lines (helpers, walkers) stay 0 and are dropped.
+  const places = new Array(output.split('\n').length + 1).fill(0);
+  for (let k = 1; k < lineMap.length; k++) if (lineMap[k]) places[headLines + k] = lineMap[k];
+  return { source: output, count, lineMap: places };
 }
 
 /** Split program output into replayed steps (line, live variables, output so far). */
@@ -611,7 +657,7 @@ export function parseTrace(stdout) {
   // the marker text was printed as if the program had written it. Split on markers
   // wherever they appear instead: every marker prints its own newline, so dropping that
   // newline together with the marker is what keeps the program's output byte-identical.
-  const pieces = String(stdout || '').split(/(__WS_(?:STEP|CALL|RET|READ|NODE)__[^\n]*)/g);
+  const pieces = String(stdout || '').split(MARK_SPLIT);
   for (const piece of pieces) {
     if (!piece) continue;
     const isMarker = MARK_PREFIXES.some(prefix => piece.startsWith(prefix));
@@ -650,6 +696,14 @@ export function parseTrace(stdout) {
         addr: parts[0],
         fields: parts.slice(1).map(f => { const eq = f.indexOf('='); const key = f.slice(0, eq), c = key.indexOf(':'); return { name: c < 0 ? key : key.slice(c + 1), kind: c < 0 ? 'i' : key.slice(0, c), value: f.slice(eq + 1) }; })
       });
+      continue;
+    }
+    // "this pointer was never given a value" / "this pointer was freed" rides with the
+    // step it describes, so it reaches the UI as a property of the variable itself.
+    if (line.startsWith('__WS_FLAG__')) {
+      const flag = parseField(line.slice(11));
+      const variable = flag && last && (last.vars || []).find(v => v.name === flag.name);
+      if (variable) { if (flag.kind === 'w') variable.wild = true; else if (flag.kind === 'f') variable.freed = true; }
       continue;
     }
     if (line.startsWith('__WS_READ__')) {

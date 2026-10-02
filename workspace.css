@@ -169,6 +169,30 @@ input,textarea,select{transition:border-color var(--t-fast) var(--ease),box-shad
 .compile-issue p{font-size:12px;line-height:1.8;color:#777;margin:10px 0 0;font-family:Consolas,"Cascadia Code",monospace;overflow-wrap:anywhere}
 .compile-issue .tutor-hint{margin-top:10px}
 .compile-lead{font-size:11px;color:#aaa;margin:0 0 12px}
+.compile-warnings{display:grid;gap:10px;margin:0 0 16px}
+.compile-warnings .compile-issue{background:#fffdf7}
+.compile-warnings .section-kicker{display:flex;align-items:center;gap:8px;font-size:11px;color:#9b834e;margin:0}
+.compile-warnings .section-kicker span{background:#fbf1dc;border-radius:10px;padding:1px 7px;font-size:10px}
+.compile-warnings .section-kicker small{color:#bdbdbd;font-size:10px}
+.compile-warn-strip{border-bottom:1px solid #efefef;background:#fffdf7}
+.compile-warn-strip summary{display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer;list-style:none;font-size:11px;color:#9b834e}
+.compile-warn-strip summary::-webkit-details-marker{display:none}
+.compile-warn-strip summary .severity-dot{background:#d5aa54}
+.compile-warn-strip summary b{font-weight:600}
+.compile-warn-strip summary small{color:#c0c0c0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.compile-warn-strip .compile-issues{padding:2px 12px 12px;max-height:170px;overflow:auto}
+.compile-warn-strip .compile-issue{padding:9px 11px}
+/* A pointer the program never gave a value to, or one whose memory was handed back. */
+.trace-var.wild{background:#fff8ec;border-color:#f0dcae}
+.trace-var.wild b{color:#8a6a1f}
+.trace-var.freed{background:#fdf0ee;border-color:#f0cdc6}
+.trace-var.freed b{color:#a4503c}
+.trace-flag{font-size:10px;color:#a4791f;background:#fff1d6;border-radius:4px;padding:1px 6px}
+.trace-flag.freed{color:#a4503c;background:#fbe4df}
+.ts-ptr.wild{background:#fff8ec;border-color:#f0dcae;color:#8a6a1f}
+.ts-ptr.freed{background:#fdf0ee;border-color:#f0cdc6;color:#a4503c}
+.ts-null.wild{fill:#c39a3f}
+.ts-null.freed{fill:#c0715c}
 
 .diff{border:1px solid #ececec;border-radius:8px;background:#fcfcfd;padding:12px 13px;display:grid;gap:8px}
 .diff-verdict{font-size:11px;color:#9c7625;background:#fff8e6;border-radius:5px;padding:6px 9px;margin-bottom:2px}

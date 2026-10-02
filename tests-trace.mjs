@@ -27,6 +27,13 @@ const CASES = {
   'unbraced for body': ['int main(void) {', '    int sum = 0;', '    for (int i = 0; i < 4; i++)', '        sum += i;', '    printf("%d\\n", sum);', '    return 0;', '}'],
   'tree with 2 field declarators': ['#include <stdlib.h>', 'struct node { int val; struct node *left, *right; };', 'struct node *ins(struct node *t, int v) {', '    if (t == NULL) {', '        struct node *n = (struct node *)malloc(sizeof(struct node));', '        n->val = v; n->left = NULL; n->right = NULL;', '        return n;', '    }', '    if (v < t->val) t->left = ins(t->left, v);', '    else t->right = ins(t->right, v);', '    return t;', '}', 'int main(void) {', '    struct node *root = NULL;', '    int keys[7] = {5, 3, 8, 1, 4, 7, 9};', '    for (int i = 0; i < 7; i++) root = ins(root, keys[i]);', '    printf("%d\\n", root->val);', '    return 0;', '}'],
   'list cursor (2 declarators)': ['#include <stdlib.h>', 'struct node {', '    int val;', '    struct node *next;', '};', 'int main(void) {', '    struct node *head = NULL, *p;', '    for (int i = 3; i >= 1; i--) {', '        p = (struct node *)malloc(sizeof(struct node));', '        p->val = i;', '        p->next = head;', '        head = p;', '    }', '    int sum = 0;', '    for (p = head; p != NULL; p = p->next) {', '        sum += p->val;', '    }', '    printf("%d\\n", sum);', '    return 0;', '}'],
+  // "struct node *p;" holds whatever the stack had there. Walking it crashed the whole
+  // trace, so the guard exists - what was missing is telling the learner that this is
+  // why the pointer has no arrow and no fields.
+  'uninitialised pointer': ['#include <stdlib.h>', 'struct node { int val; struct node *next; };', 'int main(void) {', '    struct node *p;', '    struct node *q = (struct node *)malloc(sizeof(struct node));', '    q->val = 1;', '    q->next = 0;', '    printf("%d\\n", q->val);', '    return 0;', '}'],
+  // After free() the address is still in the pointer, so the walker used to read memory
+  // the program had already handed back and draw it as the node it used to be.
+  'freed pointer': ['#include <stdlib.h>', 'struct node { int val; struct node *next; };', 'int main(void) {', '    struct node *q = (struct node *)malloc(sizeof(struct node));', '    q->val = 1;', '    q->next = 0;', '    free(q);', '    printf("done\\n");', '    return 0;', '}'],
 };
 
 /** Per-case assertions beyond "it compiles and prints the same".
@@ -46,6 +53,24 @@ const CHECKS = {
     const names = new Set(trace.steps.flatMap(s => s.vars.map(v => v.name)));
     const missing = ['head', 'p'].filter(n => !names.has(n));
     return missing.length ? ['no variable ' + missing.join(', ') + ' (saw ' + [...names].join(', ') + ')'] : [];
+  },
+  'uninitialised pointer': ({ trace }) => {
+    const problems = [];
+    const seen = trace.steps.flatMap(s => s.vars.filter(v => v.name === 'p'));
+    if (!seen.length) return ['p never reached the variables panel'];
+    if (!seen.some(v => v.wild)) problems.push('p was never marked uninitialised');
+    if (seen.some(v => !v.wild)) problems.push('p was reported as holding a value it never got');
+    if (trace.steps.some(s => s.vars.some(v => v.name === 'q' && v.wild))) problems.push('q was flagged as uninitialised');
+    return problems;
+  },
+  'freed pointer': ({ trace }) => {
+    const at = trace.steps.findIndex(s => s.vars.some(v => v.freed));
+    if (at < 0) return ['no step ever reported a freed pointer'];
+    const problems = [];
+    if (!trace.steps[at].vars.some(v => v.name === 'q' && v.freed)) problems.push('the wrong variable was reported freed');
+    // The address is gone from the walker, so nothing may be drawn for it afterwards.
+    if (trace.steps.slice(at).some(s => s.nodes.length)) problems.push('walked a node that had been freed');
+    return problems;
   },
 };
 
