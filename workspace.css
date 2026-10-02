@@ -170,6 +170,14 @@ input,textarea,select{transition:border-color var(--t-fast) var(--ease),box-shad
 .compile-issue .tutor-hint{margin-top:10px}
 .compile-lead{font-size:11px;color:#aaa;margin:0 0 12px}
 .compile-source{font-size:10px;color:#b0b0b0;margin:12px 0 4px;letter-spacing:.03em}
+.preset{margin:18px 0;border:1px solid #e6ecf4;border-radius:8px;background:#f8fbff;overflow:hidden}
+.preset summary{display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;font-size:12px;font-weight:600;color:#3b6ea5;list-style:none}
+.preset summary::-webkit-details-marker{display:none}
+.preset summary small{font-weight:400;color:#9db4cc;font-size:10px}
+.preset .chip{background:#e6f0fb;color:#4a7cb0;border-radius:9px;padding:1px 7px;font-size:10px;font-weight:400}
+.preset-code{margin:0;padding:12px;background:#fff;border-top:1px solid #e6ecf4;border-bottom:1px solid #e6ecf4;font-family:var(--font-mono);font-size:12px;line-height:1.7;white-space:pre;overflow:auto}
+.preset-note{margin:10px 12px 12px;font-size:11.5px;line-height:1.8;color:#7d6a3f}
+.preset-note code{font-family:var(--font-mono);background:#fff3d9;border-radius:4px;padding:0 4px}
 .submitted-code{max-height:46vh;overflow:auto;font-family:var(--font-mono);font-size:12px;line-height:1.7;background:#fafafa;border:1px solid #eee;border-radius:8px;padding:12px;white-space:pre}
 .result-warning button{margin-left:6px}
 .compile-warnings{display:grid;gap:10px;margin:0 0 16px}

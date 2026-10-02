@@ -82,8 +82,11 @@ export function parseCompileIssues(output, places = null) {
     if (seen.has(ruleKey)) continue;
     seen.add(ruleKey);
     const short = String(file).split(/[\\/]/).pop();
+    // A caller that offsets line numbers can name a line that is not in the editor at
+    // all - the judge's own prefix. It is listed, but there is nowhere to jump to.
+    const inPrefix = /^前置代码$/.test(short);
     issues.push({
-      startLine: line, endLine: line,
+      startLine: inPrefix ? 0 : line, endLine: inPrefix ? 0 : line,
       severity: kind === 'warning' ? 'warning' : 'error',
       title: explained.title,
       problem: short + ':' + lineText + ' · ' + message.trim(),

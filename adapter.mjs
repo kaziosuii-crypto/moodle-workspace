@@ -62,11 +62,19 @@ export function parseProblem(doc, url) {
     return [{ input: ioText(cells[0]), expected: ioText(cells[1]), time: text(cells[2]), memory: text(cells[3]), source: '公开样例' }];
   });
   const submit = [...doc.querySelectorAll('a[href]')].find(a => /\/submit\.php\?/.test(a.getAttribute('href')));
+  // "预设代码 / 前置代码": the judge compiles this text in front of the submission, and
+  // it is a hidden textarea inside #presetcode that the student never sees while writing.
+  // It is usually left deliberately unfinished - an open main() for the code to continue
+  // in - so a learner who writes a whole program ends up with two mains and a brace that
+  // never closes, which is exactly what the judge then reports.
+  const presetBox = doc.querySelector('#presetcode');
+  const preset = presetBox ? (presetBox.querySelector('textarea')?.value || '') : '';
   return {
     title, html: richContent(description, url), statement: text(description),
     timing, score: grade.match(/成绩[:：]\s*([\d.]+)/)?.[1] || '',
     discount: grade.match(/折扣[:：]\s*([\d.]+)/)?.[1] || '',
     late: text(root.querySelector('#time-table p')).replace(/^允许迟交\s*[:：]\s*/, ''),
+    preset: preset.replace(/\r\n/g, '\n').replace(/\s+$/, ''),
     tests, submitURL: submit ? safeURL(submit.getAttribute('href'), url) : ''
   };
 }

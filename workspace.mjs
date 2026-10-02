@@ -562,12 +562,29 @@ function applyHistoryCode(source){
   editor.focus();
   toast('已放进代码栏，Ctrl+Z 可以撤销');
 }
+/**
+ * The judge's own "预设代码 / 前置代码".
+ *
+ * It is compiled in front of the submission, and on this course it is deliberately left
+ * unfinished - an open main() that the answer is supposed to continue inside. Nothing in
+ * Moodle's submit page shows it, so a learner writes a whole program and the judge then
+ * reports a second main and a brace that never closes. Showing it is the whole point.
+ */
+function presetHTML(p){
+  const lines=String(p.preset||'').split('\n').length;
+  const open=/\bmain\s*\([^)]*\)\s*\{[^}]*$/.test(String(p.preset||'').replace(/\/\*[\s\S]*?\*\//g,'').replace(/\/\/[^\n]*/g,''));
+  return '<details class="preset" open><summary>前置代码 <span class="chip">'+lines+' 行</span><small>判题机会把它拼在你的代码前面</small></summary>'+
+    '<pre class="preset-code">'+esc(p.preset)+'</pre>'+
+    (open?'<p class="preset-note">这段代码里的 <code>main</code> 没有闭合，是留给你往下接着写的：<b>不要再写一遍 #include 和 int main</b>，直接写里面的语句，最后补上 <code>}</code>。</p>':'')+
+    '</details>';
+}
 function renderDescription() {
   const p=current.problem;
   replaceContent($('[data-left-body]'),`<article class="description">
     <div class="title-row"><h1>${esc(p.title)}</h1>${current.result?.passed===current.result?.total && current.result?.total ? `<span class="solved muted">已解答 ${icon('check','green')}</span>`:''}</div>
     <div class="chips">${p.score?`<span class="chip green">满分 ${esc(p.score)}</span>`:''}${p.tests[0]?.memory?`<span class="chip">内存 ${esc(p.tests[0].memory)}</span>`:''}${p.discount?`<span class="chip">折扣系数 ${esc(p.discount)}</span>`:''}</div>
     <div class="statement">${p.html || '<p class="muted">此题没有可读取的题干。</p>'}</div>
+    ${p.preset?presetHTML(p):''}
     ${p.tests.map((t,i)=>`<section class="example"><h3>示例 ${i+1}：</h3><div class="example-data"><div class="io-line"><strong>输入：</strong><pre>${esc(t.input)}</pre></div><div class="io-line"><strong>输出：</strong><pre>${ioDisplay(t.expected)}</pre></div></div></section>`).join('')}
     <details class="schedule" open><summary>提交时间与规则</summary><dl>${p.timing.map(t=>`<dt>${esc(t.label)}</dt><dd><time>${esc(t.date)}</time><span class="muted">${esc(t.time)}</span></dd>`).join('')}${p.late?`<dt>允许迟交</dt><dd>${esc(p.late)}</dd>`:''}</dl></details>
     </article>`);
@@ -595,7 +612,7 @@ function compilePanel(message) {
   const issues=parseCompileIssues(message);
   const list=issues.length?'<div class="compile-issues">'+issues.map(issue=>
     '<article class="compile-issue '+issue.severity+'"><header><span class="severity-dot"></span><strong>'+esc(issue.title)+
-    '</strong><button data-compile-line="'+issue.startLine+'">L'+issue.startLine+'</button></header><p>'+esc(issue.problem)+'</p>'+
+    '</strong>'+(issue.startLine?'<button data-compile-line="'+issue.startLine+'">L'+issue.startLine+'</button>':'<span class="chip">前置代码</span>')+'</header><p>'+esc(issue.problem)+'</p>'+
     (issue.hint?'<div class="tutor-hint"><span>怎么改</span>'+esc(issue.hint)+'</div>':'')+'</article>').join('')+'</div>':'';
   // Nothing was recognised as a diagnostic: say so plainly instead of showing one
   // sentence with no explanation, and open up everything else the page did contain.
@@ -619,7 +636,7 @@ function compileWarnings(){return (current?.compileIssues||[]).filter(i=>i.sever
 /** One compiler diagnostic, as a card the editor can jump to. */
 function issueCardsHTML(issues){
   return issues.map(issue=>'<article class="compile-issue '+issue.severity+'"><header><span class="severity-dot"></span><strong>'+esc(issue.title)+
-    '</strong><button data-compile-line="'+issue.startLine+'">L'+issue.startLine+'</button></header><p>'+esc(issue.problem)+'</p>'+
+    '</strong>'+(issue.startLine?'<button data-compile-line="'+issue.startLine+'">L'+issue.startLine+'</button>':'<span class="chip">前置代码</span>')+'</header><p>'+esc(issue.problem)+'</p>'+
     (issue.hint?'<div class="tutor-hint"><span>怎么改</span>'+esc(issue.hint)+'</div>':'')+'</article>').join('');
 }
 function compileWarnHTML(){
@@ -1077,15 +1094,21 @@ function locateIssue(index) {
   editor.dispatch({selection:{anchor:from,head:to},effects:EditorView.scrollIntoView(from,{y:'center'})});
   editor.focus();
 }
+/**
+ * Read a judge result with the prefix in mind: its line numbers count prefix + code.
+ */
+function adoptJudgeResult(result){
+  if(typeof result?.message==='string')result.message=shiftDiagnostics(result.message);
+  current.compileIssues=result?.compile?parseCompileIssues(result.message):[];
+  syncDiagnosis();
+  return result;
+}
 async function refreshResult(source='previous') {
   if(busy)return;
   const id=current.id,doc=await requestDoc(activity('result.php'));
   if(id!==current.id)return;
-  const result=parseResult(doc,activity('result.php'));
   // A judge compile error gets the same cards and editor marks as a local build.
-  current.compileIssues=result.compile?parseCompileIssues(result.message):[];
-  syncDiagnosis();
-  current.result={...result,source};
+  current.result={...adoptJudgeResult(parseResult(doc,activity('result.php'))),source};
   switchBottom('results');
 }
 /** Newest submission id from the history list; the same ?submitid= shape in intranet and proxied deployments. */
@@ -1131,9 +1154,7 @@ async function submit() {
     }
     if(result.finished && !result.pending){
       // Same treatment as a local build: the diagnostics become cards and editor marks.
-      current.compileIssues=result.compile?parseCompileIssues(result.message):[];
-      syncDiagnosis();
-      current.result={...result,submitId,source:'submitted',submittedCode:data.get('code'),uploadedFile:file?.name||''};
+      current.result={...adoptJudgeResult(result),submitId,source:'submitted',submittedCode:data.get('code'),uploadedFile:file?.name||''};
       switchBottom('results');
       return;
     }
@@ -2148,14 +2169,36 @@ async function compileC(source,onProgress){
     throw error;
   }
 }
+/** The student's editor content with the judge's prefix in front of it. */
+function withPreset(source){
+  const preset=current?.problem?.preset;
+  if(!preset)return source;
+  return preset.replace(/\n$/,'')+'\n'+source;
+}
+const presetLines=()=>{ const preset=current?.problem?.preset; return preset?preset.replace(/\n$/,'').split('\n').length:0; };
+/**
+ * Move the judge's line numbers back onto the editor.
+ *
+ * They are counted in prefix + code, so everything inside the prefix is named as such
+ * and everything after it shifts up by the prefix's length.
+ */
+function shiftDiagnostics(message){
+  const base=presetLines();
+  if(!base)return message;
+  return String(message||'').replace(/^([^\s:][^\s:]*):(\d+):((?:\d+:)?\s*(?:fatal error|error|warning|note):)/gm,(whole,file,line,rest)=>{
+    const n=Number(line);
+    if(!Number.isFinite(n)||n<1)return whole;
+    return n<=base ? ('前置代码:'+n+':'+rest) : (file+':'+(n-base)+':'+rest);
+  });
+}
 async function compileSource(compile,source){
   // -Wall, deliberately without -Werror: a warning must never stop code from running.
   // The judge's own dialect, so a program that fails there fails here the same way.
-  const {module,compileOutput}=await compile({source,fileName:'main.c',flags:['-O0','-Wall',...dialectFlags()]});
-  if(!module)throw new Error((compileOutput||'编译失败').trim().slice(0,4000));
+  const {module,compileOutput}=await compile({source:withPreset(source),fileName:'main.c',flags:['-O0','-Wall',...dialectFlags()]});
+  if(!module)throw new Error(shiftDiagnostics((compileOutput||'编译失败').trim()).slice(0,4000));
   // Warnings used to be thrown away the moment a module came back, which is exactly how
   // a missing "&" in scanf stayed invisible: it compiles clean and only warns.
-  return {module,warnings:compileOutput||''};
+  return {module,warnings:shiftDiagnostics(compileOutput||'')};
 }
 /**
  * Execution sandbox.
