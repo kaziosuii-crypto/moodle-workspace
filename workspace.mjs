@@ -7,7 +7,7 @@ import { autocompletion, completionKeymap, completionStatus, closeBrackets, clos
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
 import css from './workspace.css';
 import { esc, text, safeURL, ioDisplay, parseProblem, parseNavigation, parseResult } from './adapter.mjs';
-import { parseCompileIssues, diffBlock, describeDiff } from './diagnostics.mjs';
+import { parseCompileIssues, explainCompileMessage, diffBlock, describeDiff } from './diagnostics.mjs';
 import { SANDBOX_SOURCE } from './sandbox.mjs';
 import { ToolchainError, TOOLCHAIN_SIZE, canPick, hiddenMode, wasmRefused, lastIncompleteReason, loadToolchain, installToolchain, grantToolchain, toolchainStatus } from './toolchain.mjs';
 import { getKey, setKey, hasKey, maskKey } from './ai-key.mjs';
@@ -672,10 +672,17 @@ function renderCases() {
 }
 /** Compiler diagnostics explained in plain Chinese, each linked to its line. */
 function compilePanel(message) {
-  const issues=parseCompileIssues(message);
+  let issues=parseCompileIssues(message);
+  // A linker error has no "file:line:" to parse, so it would otherwise come out as a
+  // sentence with no card, hint or line - which reads like the tool broke.
+  if(!issues.length&&/[\s:]error[\s:]/i.test(message)){
+    const explained=explainCompileMessage(message);
+    const line=String(message).split('\n').map(s=>s.trim()).filter(Boolean).pop()||String(message);
+    issues=[{startLine:0,endLine:0,severity:'error',title:explained.title,problem:line.slice(0,220),hint:explained.hint}];
+  }
   const list=issues.length?'<div class="compile-issues">'+issues.map(issue=>
     '<article class="compile-issue '+issue.severity+'"><header><span class="severity-dot"></span><strong>'+esc(issue.title)+
-    '</strong>'+(issue.startLine?'<button data-compile-line="'+issue.startLine+'">L'+issue.startLine+'</button>':'<span class="chip">前置代码</span>')+'</header><p>'+esc(issue.problem)+'</p>'+
+    '</strong>'+(issue.startLine?'<button data-compile-line="'+issue.startLine+'">L'+issue.startLine+'</button>':(issue.prefix?'<span class="chip">前置代码</span>':''))+'</header><p>'+esc(issue.problem)+'</p>'+
     (issue.hint?'<div class="tutor-hint"><span>怎么改</span>'+esc(issue.hint)+'</div>':'')+'</article>').join('')+'</div>':'';
   // Nothing was recognised as a diagnostic: say so plainly instead of showing one
   // sentence with no explanation, and open up everything else the page did contain.
@@ -699,7 +706,7 @@ function compileWarnings(){return (current?.compileIssues||[]).filter(i=>i.sever
 /** One compiler diagnostic, as a card the editor can jump to. */
 function issueCardsHTML(issues){
   return issues.map(issue=>'<article class="compile-issue '+issue.severity+'"><header><span class="severity-dot"></span><strong>'+esc(issue.title)+
-    '</strong>'+(issue.startLine?'<button data-compile-line="'+issue.startLine+'">L'+issue.startLine+'</button>':'<span class="chip">前置代码</span>')+'</header><p>'+esc(issue.problem)+'</p>'+
+    '</strong>'+(issue.startLine?'<button data-compile-line="'+issue.startLine+'">L'+issue.startLine+'</button>':(issue.prefix?'<span class="chip">前置代码</span>':''))+'</header><p>'+esc(issue.problem)+'</p>'+
     (issue.hint?'<div class="tutor-hint"><span>怎么改</span>'+esc(issue.hint)+'</div>':'')+'</article>').join('');
 }
 function compileWarnHTML(){
@@ -2466,8 +2473,12 @@ async function runTests() {
         try{ ({module,warnings:compileWarnings}=await compileC(submittedSource,onProgress)); }
         catch(error){
           // "main.c:3:5: error: ..." is the user's code failing to compile, not a
-          // missing toolchain, so it must reach the compiler-diagnostics panel.
+          // missing toolchain, so it must reach the compiler-diagnostics panel. A linker
+          // error is the same thing: "wasm-ld: error: ... undefined symbol: jsmax" means
+          // the code calls something that does not exist - showing "内置编译器不可用" and
+          // switching to the online compiler hid the one message that explains it.
           if(/[^\s:][^:]*:\d+:(?:\d+:)?\s*(?:fatal error|error|warning):/.test(error.message))throw error;
+          if(/undefined symbol|duplicate symbol|cannot find -l|wasm-ld:|collect2:|ld returned/i.test(error.message))throw error;
           // No folder yet, or a permission that lapsed: that is a question for the
           // learner, not a reason to quietly send their code to a public compiler.
           if(handleToolchainError(error,()=>runTests()))return;

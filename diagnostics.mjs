@@ -30,6 +30,9 @@ const COMPILE_RULES = [
   [/implicit declaration of function 'scanf'|implicit declaration of function 'printf'/i, '忘了 #include <stdio.h>', 'printf 和 scanf 都要 #include <stdio.h>。'],
   [/comparison between pointer and integer|incompatible (integer|pointer) to (integer|pointer)/i, '类型不匹配', '把不同类型的东西直接比较或赋值了。检查是不是漏写 & 或者多写了 *。'],
   [/undefined reference to/i, '链接失败：找不到这个函数', '函数名拼错了，或者只声明了却没有写实现。'],
+  // wasm-ld (the local toolchain) words it differently, and without a line number.
+  [/undefined symbol[\s:]+([A-Za-z_]\w*)/i, '有个函数或变量没有定义', '链接器找不到这个名字：先看拼写，再看是不是只写了调用、没有写定义。函数要写在 main 前面，或者在使用前先声明。'],
+  [/duplicate symbol/i, '同一个名字定义了两次', '两个地方定义了同名的函数或全局变量，删掉其中一个。'],
   [/expected declaration specifiers/i, '这里应该是类型名', 'C 语言的语句要写在函数内部，函数外面只能放声明和定义。'],
   [/conflicting types for/i, '同一个东西被定义成了两种类型', '检查函数声明和定义的返回类型、参数类型是否一致。'],
   [/expected expression/i, '这里缺了一个表达式', '常见原因是多打了一个逗号或运算符，或者赋值号右边是空的。'],
@@ -86,7 +89,7 @@ export function parseCompileIssues(output, places = null) {
     // all - the judge's own prefix. It is listed, but there is nowhere to jump to.
     const inPrefix = /^前置代码$/.test(short);
     issues.push({
-      startLine: inPrefix ? 0 : line, endLine: inPrefix ? 0 : line,
+      startLine: inPrefix ? 0 : line, endLine: inPrefix ? 0 : line, prefix: inPrefix,
       severity: kind === 'warning' ? 'warning' : 'error',
       title: explained.title,
       problem: short + ':' + lineText + ' · ' + message.trim(),
