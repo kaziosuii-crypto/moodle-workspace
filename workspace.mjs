@@ -9,6 +9,7 @@ import css from './workspace.css';
 import { esc, text, safeURL, ioDisplay, parseProblem, parseNavigation, parseResult } from './adapter.mjs';
 import { parseCompileIssues, diffBlock, describeDiff } from './diagnostics.mjs';
 import { SANDBOX_SOURCE } from './sandbox.mjs';
+import { ToolchainError, TOOLCHAIN_SIZE, canPick, loadToolchain, installToolchain, grantToolchain, toolchainStatus } from './toolchain.mjs';
 import { getKey, setKey, hasKey, maskKey } from './ai-key.mjs';
 import dagre from 'dagre';
 import cytoscape from 'cytoscape';
@@ -44,9 +45,12 @@ const base = new URL('./', location.href).href;
 let host, root, editor, current, problems = [], currentIndex = -1, busy = false, navToken = 0, saveTimer, toastTimer, modalCleanup;
 let testIndex = 0, resultIndex = 0, activeLeft = 'description', activeBottom = 'cases';
 const prefsKey = 'moodle-workspace:v4:settings';
+/** Set when the learner picks the online compiler instead of installing the built-in one. */
+const ONLINE_ONLY = 'moodle-workspace:v6:online-compiler';
 const read = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } };
 const storedPrefs=read(prefsKey,{});
 dropStoredAnalyses();
+dropStoredToolchain();
 let prefs = {enabled:storedPrefs.aiV5Enabled??true,runner:storedPrefs.runner||'',copilot:storedPrefs.copilot??true};
 function persist(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); return true; }
@@ -77,6 +81,15 @@ const draftKey = id => `moodle-workspace:v4:${location.origin}:${id}`;
 // few KB each they are what filled localStorage and broke draft saving.
 function dropStoredAnalyses() {
   try { for (const key of Object.keys(localStorage)) if (key.includes(':tutor:')) localStorage.removeItem(key); } catch {}
+}
+/**
+ * The compiler used to live in the browser cache, which could never be handed to the
+ * module loader. Anyone who installed it that way is holding ~113 MB of dead weight,
+ * so the old bucket and its flags go away on the next load.
+ */
+function dropStoredToolchain() {
+  try { localStorage.removeItem('moodle-workspace:v5:c-toolchain'); localStorage.removeItem('moodle-workspace:v5:c-toolchain-dismissed'); } catch {}
+  try { if (self.caches) caches.delete('moodle-workspace-c-toolchain-v1'); } catch {}
 }
 const code = () => editor?.state.doc.toString() ?? current?.draft.code ?? '';
 const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)');
@@ -1053,20 +1066,13 @@ async function runOnline(source,stdin){
   throw new Error(transport.message+' 已重试 4 次；网络代理可能会拦截较慢的境外请求，稍后或在更稳定的网络下重试。');
 }
 // In-browser C toolchain: Clang/LLVM compiled to WASM, running programs on a WASI
-// shim. Nothing is sent to a server. The ~90 MB payload is fetched once on first use
-// and then served from the browser cache, so this is the offline-capable backend.
-const WASM_TOOLCHAIN='https://cdn.jsdelivr.net/npm/browsercc@0.1.1/dist/index.js';
-const WASI_SHIM='https://cdn.jsdelivr.net/npm/@bjorn3/browser_wasi_shim@0.4.2/dist/wasi.js';
-const WASI_SHIM_FS='https://cdn.jsdelivr.net/npm/@bjorn3/browser_wasi_shim@0.4.2/dist/fs_mem.js';
+// shim. Nothing is sent to a server, and nothing is kept in the browser cache - the
+// files live in a folder the user picks once (see toolchain.mjs for why).
 let cToolchain=null;
-async function loadToolchain(onProgress){
+async function loadCompiler(onProgress){
   if(cToolchain)return cToolchain;
-  if(!read(TC_FLAG,false)&&!await tcCached())await tcDownload(onProgress||(()=>{}));
-  persist(TC_FLAG,true);
-  tcPatchFetch();
   onProgress?.('正在启动编译器…');
-  const [toolchain,shim]=await Promise.all([import(WASM_TOOLCHAIN),import(WASI_SHIM)]);
-  cToolchain={compile:toolchain.compile,shim};
+  cToolchain=await loadToolchain();
   return cToolchain;
 }
 /* ------------------------------------------------------------ 逐行执行动画 --
@@ -1968,6 +1974,11 @@ async function startTrace(){
     current.trace={status:'ready',steps,finalOutput,cursor:0,playing:false,mode:current.trace?.mode||'skip',speed:5,fullscreen:false};
     traceHighlight(steps[0].line);
   }catch(error){
+    // No folder yet, or a permission that lapsed: ask, then run this again.
+    if(handleToolchainError(error,()=>startTrace())){
+      current.trace={status:'error',error:'需要先准备好内置编译器。按弹窗里的按钮完成，这段代码会自动重新记录一次。'};
+      return;
+    }
     // Two ways a runaway program is stopped: the sandbox deadline, and the
     // 20000-step ceiling baked into the instrumented source.
     current.trace={status:'error',error:error.timeout
@@ -1978,7 +1989,7 @@ async function startTrace(){
   renderTrace();
 }
 async function compileC(source,onProgress){
-  const {compile}=await loadToolchain(onProgress);
+  const {compile}=await loadCompiler(onProgress);
   onProgress?.('正在编译…');
   // -Wall, deliberately without -Werror: a warning must never stop code from running.
   const {module,compileOutput}=await compile({source,fileName:'main.c',flags:['-O0','-Wall']});
@@ -2031,9 +2042,10 @@ function openSandbox(){
 }
 async function ensureSandbox(){
   if(cSandbox)return cSandbox;
+  const toolchain=await loadCompiler();
   const sandbox=openSandbox();
   try{
-    const reply=await sandbox.call({type:'init',wasi:WASI_SHIM,fs:WASI_SHIM_FS,cached:[...tcURLs]},45000);
+    const reply=await sandbox.call({type:'init',wasi:toolchain.wasiURL,fs:toolchain.fsURL},45000);
     if(reply.type!=='ready')throw new Error(reply.message||('沙箱返回了 '+reply.type));
   }
   catch(error){
@@ -2061,130 +2073,87 @@ async function runCModule(module,stdin){
   if(reply.type!=='done')throw new Error(reply.message||'执行沙箱返回了异常结果');
   return{stdout:reply.stdout,stderr:reply.stderr};
 }
-// ---- Built-in C toolchain: download flow, local cache, and offline reuse ----
-const TC_CDN='https://cdn.jsdelivr.net/npm/browsercc@0.1.1/dist/';
-const TC_SHIM='https://cdn.jsdelivr.net/npm/@bjorn3/browser_wasi_shim@0.4.2/dist/';
-const TC_FILES=[
-  ['clang.js',0.07],['clang.wasm',40.58],['lld.js',0.07],['lld.wasm',22.13],['sysroot.tar',27.29],['index.js',0.01],
-].map(([name,mb])=>({url:TC_CDN+name,name,bytes:mb*1048576}));
-const TC_SHIM_FILES=['index.js','wasi.js','fd.js','fs_mem.js','fs_opfs.js','strace.js','wasi_defs.js','debug.js']
-  .map(name=>({url:TC_SHIM+name,name:'shim/'+name,bytes:65536}));
-const TC_CACHE='moodle-workspace-c-toolchain-v1';
-const TC_FLAG='moodle-workspace:v5:c-toolchain';
-const TC_DISMISS='moodle-workspace:v5:c-toolchain-dismissed';
-let tcFetchPatched=false;
-const tcURLs=new Set([...TC_FILES,...TC_SHIM_FILES].map(a=>a.url));
-async function tcCached(){
-  try{ if(!self.caches)return false; const c=await caches.open(TC_CACHE); return !!(await c.match(TC_FILES[1].url)); }catch{ return false; }
-}
-function tcPatchFetch(){
-  if(tcFetchPatched)return; tcFetchPatched=true;
-  const original=self.fetch.bind(self);
-  self.fetch=(input,init)=>{
-    const url=typeof input==='string'?input:input?.url;
-    if(!url||!tcURLs.has(url))return original(input,init);
-    return caches.open(TC_CACHE).then(c=>c.match(url)).then(hit=>hit?hit.clone():original(input,init));
+// ---- Built-in C toolchain: the folder the user picks, and the dialogs around it ----
+/**
+ * Ask for the folder, or for permission to keep using the one already chosen.
+ *
+ * Both calls need a real click, so this runs from the button in the dialog rather
+ * than from the `运行` that noticed the problem.
+ */
+function toolchainDialog(code,retry){
+  const pick=canPick();
+  const copy={
+    absent:{title:'需要内置 C 编译器',lead:'在线调试要用本机编译代码。编译器（'+TOOLCHAIN_SIZE+'）只下载一次，之后一直用这些文件。',
+      detail:pick?'推荐选一个文件夹存下来，文件你能直接看到、也能自己删；不想授权的话，也可以放进浏览器自己的存储里。':'这个浏览器不能选文件夹，编译器会放进浏览器自己的存储里，同样只需要一次。',
+      action:pick?'选择文件夹并下载':'下载到浏览器存储',alt:pick?'存到浏览器里':null},
+    'needs-permission':{title:'重新允许访问编译器文件夹',lead:'上次的授权已经过期，浏览器要求再确认一次才能读那些文件。',detail:'点下面的按钮，然后在浏览器的提示里选择「允许」。',action:'允许访问'},
+    denied:{title:'编译器文件夹被拒绝访问',lead:'浏览器记下了「拒绝」，需要你重新指定一个文件夹。',detail:'',action:'重新选择文件夹'},
+    incomplete:{title:'编译器文件不完整',lead:'文件夹里缺少必要文件，可能是上次下载中途断了。',detail:'重新下载会覆盖这些文件。',action:'重新下载'},
+    'picker-failed':{title:'打不开文件夹选择器',lead:'浏览器拒绝了这次文件夹选择。',detail:'可以改用浏览器自己的存储，不需要授权。',action:'再试一次',alt:'存到浏览器里'},
+    unsupported:{title:'这个浏览器装不了内置编译器',lead:'它既不支持文件夹访问，也没有可用的浏览器存储。',detail:'可以改用在线编译器：代码会发到公网编译器上运行，不需要下载。',action:'改用在线编译器',alt:'知道了'},
+  }[code]||{title:'内置编译器不可用',lead:'',detail:'',action:'重试'};
+  const m=openModal(`<header><h2>${esc(copy.title)}</h2></header>
+    <div class="dl-body"><p><strong>${esc(copy.lead)}</strong></p>${copy.detail?'<p>'+esc(copy.detail)+'</p>':''}</div>
+    <footer><button data-dl-cancel>${esc(code==='unsupported'?'改用在线编译器':'取消')}</button>${code!=='unsupported'&&copy.alt?'<button data-dl-opfs>'+esc(copy.alt)+'</button>':''}${code==='unsupported'?'':'<button data-dl-start class="primary">'+esc(copy.action)+'</button>'}</footer>`);
+  m.querySelector('[data-dl-cancel]').onclick=()=>{
+    closeModal();
+    // "改用在线编译器" is a choice the run should remember, not a dismissal.
+    if(code==='unsupported'){persist(ONLINE_ONLY,true);toast('已改用在线编译器。');retry&&retry();}
   };
-}
-async function untarGz(buffer){
-  if(!self.DecompressionStream)throw new Error('浏览器不支持解压，请升级浏览器');
-  const stream=new Blob([buffer]).stream().pipeThrough(new DecompressionStream('gzip'));
-  const tar=new Uint8Array(await new Response(stream).arrayBuffer());
-  const decoder=new TextDecoder(),files={};
-  for(let offset=0;offset+512<=tar.length;){
-    const name=decoder.decode(tar.subarray(offset,offset+100)).replace(/\0.*$/,'');
-    if(!name)break;
-    const size=parseInt(decoder.decode(tar.subarray(offset+124,offset+136)).replace(/\0.*$/,'').trim(),8)||0;
-    const from=offset+512;
-    files[name]=tar.slice(from,from+size);
-    offset=from+Math.ceil(size/512)*512;
-  }
-  return files;
-}
-async function tcPull(url,label,onProgress,weight,offset){
-  const response=await fetch(url,{cache:'no-store'});
-  if(!response.ok)throw new Error(`${label} 返回 ${response.status}`);
-  const total=Number(response.headers.get('content-length'))||1;
-  const reader=response.body?.getReader();
-  if(!reader)return untarGz(await response.arrayBuffer());
-  const chunks=[]; let received=0;
-  for(;;){
-    const step=await reader.read();
-    if(step.done)break;
-    chunks.push(step.value); received+=step.value.length;
-    onProgress(offset+Math.min(1,received/total)*weight,`正在从 ${label} 下载…`);
-  }
-  return untarGz(await new Blob(chunks).arrayBuffer());
-}
-// One gzipped npm tarball (38 MB) beats the loose artefacts (90 MB), and mirrors
-// serve tarballs well; each source is tried in turn until one succeeds.
-const TC_SOURCES=[
-  {label:'npm 官方源',main:'https://registry.npmjs.org/browsercc/-/browsercc-0.1.1.tgz',shim:'https://registry.npmjs.org/@bjorn3/browser_wasi_shim/-/browser_wasi_shim-0.4.2.tgz'},
-  {label:'npmmirror 国内源',main:'https://registry.npmmirror.com/browsercc/-/browsercc-0.1.1.tgz',shim:'https://registry.npmmirror.com/@bjorn3/browser_wasi_shim/-/browser_wasi_shim-0.4.2.tgz'},
-];
-async function tcDownload(onProgress){
-  const cache=await caches.open(TC_CACHE);
-  let lastError;
-  for(const source of TC_SOURCES){
+  // Nothing to download here: the only useful button is the one that switches backend.
+  if(code==='unsupported')return;
+  const start=async(mode)=>{
+    m.querySelector('.dl-body').innerHTML=ringHTML(0)+'<p class="dl-note">正在准备编译器，请保持页面打开…</p>';
+    m.querySelector('footer').innerHTML='';
+    const paint=(fraction,message)=>{
+      const fg=m.querySelector('.ring-fg'),label=m.querySelector('.dl-ring span');
+      if(fg)fg.setAttribute('stroke-dashoffset',(2*Math.PI*26*(1-fraction)).toFixed(1));
+      if(label)label.textContent=Math.round(fraction*100)+'%';
+      const note=m.querySelector('.dl-note');
+      if(note&&message)note.textContent=message;
+    };
     try{
-      onProgress(0,`正在从 ${source.label} 下载编译器…`);
-      const main=await tcPull(source.main,source.label,onProgress,0.94,0);
-      const shim=await tcPull(source.shim,source.label,onProgress,0.06,0.94);
-      const prefix='package/dist/';
-      for(const [name,bytes] of Object.entries(main))if(name.startsWith(prefix))await cache.put(TC_CDN+name.slice(prefix.length),new Response(bytes));
-      for(const [name,bytes] of Object.entries(shim))if(name.startsWith(prefix))await cache.put(TC_SHIM+name.slice(prefix.length),new Response(bytes));
-      persist(TC_FLAG,true);
-      return true;
-    }catch(error){ lastError=error; }
-  }
-  throw lastError||new Error('所有下载源都失败了');
+      if(code==='needs-permission'||code==='denied')await grantToolchain();
+      else await installToolchain(paint,mode);
+      closeModal();
+      toast(mode==='opfs'?'编译器已放进浏览器存储。':'编译器已就绪。');
+      retry&&retry();
+    }catch(error){
+      if(error&&error.code==='cancelled'){closeModal();return;}
+      m.querySelector('.dl-body').innerHTML='<p><strong>没有成功</strong></p><p>'+esc(String(error&&error.message||error))+'</p>';
+      m.querySelector('footer').innerHTML='<button data-dl-cancel>关闭</button><button data-dl-opfs>存到浏览器里</button><button data-dl-start class="primary">重试</button>';
+      m.querySelector('[data-dl-cancel]').onclick=()=>closeModal();
+      m.querySelector('[data-dl-opfs]').onclick=()=>start('opfs');
+      m.querySelector('[data-dl-start]').onclick=()=>start(mode);
+    }
+  };
+  m.querySelector('[data-dl-start]').onclick=()=>start(null);
+  const opfs=m.querySelector('[data-dl-opfs]');
+  if(opfs)opfs.onclick=()=>start('opfs');
 }
 function ringHTML(percent){
   const r=26,c=2*Math.PI*r;
   return `<div class="dl-ring"><svg viewBox="0 0 64 64"><circle class="ring-bg" cx="32" cy="32" r="${r}"/><circle class="ring-fg" cx="32" cy="32" r="${r}" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${(c*(1-percent)).toFixed(1)}"/></svg><span>${Math.round(percent*100)}%</span></div>`;
 }
-async function tcOffer(){
-  if(cToolchain||await tcCached()){ persist(TC_FLAG,true); return; }
-  const m=openModal(`<header><h2>需要内置 C 编译器</h2></header>
-    <div class="dl-body"><p><strong>在线调试需要下载内置的 C 编译器（约 40 MB）。</strong></p>
-    <p>不下载就无法在本地编译运行代码，「运行」按钮将不可用。<br>只需下载一次，之后会缓存在本机，断网也能用。</p></div>
-    <footer><button data-dl-cancel>取消</button><button data-dl-start class="primary">下载</button></footer>`);
-  m.querySelector('[data-dl-cancel]').onclick=()=>{ persist(TC_DISMISS,true); closeModal(); };
-  // Retry must re-enter this routine; calling .click() on the button from its
-  // own handler recursed forever after a failed attempt.
-  const startDownload=async()=>{
-    m.querySelector('.dl-body').innerHTML=ringHTML(0)+'<p class="dl-note">正在下载并缓存编译器，请保持页面打开…</p>';
-    m.querySelector('footer').innerHTML='';
-    try{
-      const paint=(fraction,message)=>{
-        const fg=m.querySelector('.ring-fg'),label=m.querySelector('.dl-ring span');
-        if(fg)fg.setAttribute('stroke-dashoffset',(2*Math.PI*26*(1-fraction)).toFixed(1));
-        if(label)label.textContent=Math.round(fraction*100)+'%';
-        const note=m.querySelector('.dl-note');
-        if(note&&message)note.textContent=message;
-      };
-      await tcDownload(paint);
-      persist(TC_DISMISS,true);
-      m.querySelector('.dl-body').innerHTML='<p><strong>下载完成</strong></p><p>编译器已缓存到本机，之后运行无需再次下载。</p>';
-      setTimeout(closeModal,1600);
-    }catch(error){
-      m.querySelector('.dl-body').innerHTML=`<p><strong>下载失败</strong></p><p>${esc(error.message)}</p>`;
-      m.querySelector('footer').innerHTML='<button data-dl-cancel>关闭</button><button data-dl-start class="primary">重试</button>';
-      m.querySelector('[data-dl-cancel]').onclick=()=>closeModal();
-      m.querySelector('[data-dl-start]').onclick=startDownload;
-    }
-  };
-  m.querySelector('[data-dl-start]').onclick=startDownload;
+/**
+ * Turn a ToolchainError into the dialog that fixes it.
+ *
+ * The run is retried after the problem is solved, so the learner gets the thing they
+ * asked for instead of having to press the button twice.
+ */
+function handleToolchainError(error,retry){
+  if(!error||!(error instanceof ToolchainError))return false;
+  if(error.code==='unsupported'){toolchainDialog('unsupported',retry);return true;}
+  toolchainDialog(error.code,retry);
+  return true;
 }
+/** A folder is already set up: offer nothing, and never block a run on a dialog. */
 async function maybeOfferToolchain(){
-  if(read(TC_DISMISS,false))return;
-  if(read(TC_FLAG,false)||await tcCached()){ persist(TC_FLAG,true); return; }
-  if(!self.caches)return;
-  tcOffer();
+  const status=await toolchainStatus();
+  if(status==='ready'||status==='unsupported')return;
 }
 async function runTests() {
   if(busy)return;
-  if(!prefs.runner&&!read(TC_FLAG,false)&&!await tcCached()){ tcOffer(); return; }
   setBusy(true);saveDraft();current.compileIssues=[];syncDiagnosis();
   try {
     const tests=structuredClone(current.draft.tests),submittedSource=code();
@@ -2202,12 +2171,18 @@ async function runTests() {
       // Local WASM compiler first; fall back to the online playground if it cannot load.
       const onProgress=message=>{current.result={rows:[],total:0,pending:true,message};switchBottom('results');};
       let module=null;
-      try{ ({module,warnings:compileWarnings}=await compileC(submittedSource,onProgress)); }
-      catch(error){
-        // "main.c:3:5: error: ..." is the user's code failing to compile, not a
-        // missing toolchain, so it must reach the compiler-diagnostics panel.
-        if(/[^\s:][^:]*:\d+:(?:\d+:)?\s*(?:fatal error|error|warning):/.test(error.message))throw error;
-        toast('内置编译器不可用，改用在线编译器：'+error.message.slice(0,60));
+      // 在线编译器模式：用户明确选过它，就不再打扰。
+      if(!read(ONLINE_ONLY,false)){
+        try{ ({module,warnings:compileWarnings}=await compileC(submittedSource,onProgress)); }
+        catch(error){
+          // "main.c:3:5: error: ..." is the user's code failing to compile, not a
+          // missing toolchain, so it must reach the compiler-diagnostics panel.
+          if(/[^\s:][^:]*:\d+:(?:\d+:)?\s*(?:fatal error|error|warning):/.test(error.message))throw error;
+          // No folder yet, or a permission that lapsed: that is a question for the
+          // learner, not a reason to quietly send their code to a public compiler.
+          if(handleToolchainError(error,()=>runTests()))return;
+          toast('内置编译器不可用，改用在线编译器：'+error.message.slice(0,60));
+        }
       }
       results=[];
       for(let index=0;index<tests.length;index++){

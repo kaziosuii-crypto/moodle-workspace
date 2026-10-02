@@ -10,21 +10,12 @@
  * bundle. It deliberately avoids template literals to keep that string simple.
  */
 export const SANDBOX_SOURCE = String.raw`let shim=null,ready=false;
-function patchFetch(urls){
-  const CACHE='moodle-workspace-c-toolchain-v1';
-  const known=new Set(urls||[]);
-  const original=self.fetch.bind(self);
-  self.fetch=function(input,init){
-    const url=typeof input==='string'?input:(input&&input.url);
-    if(!url||!known.has(url))return original(input,init);
-    return caches.open(CACHE).then(function(c){return c.match(url);}).then(function(hit){return hit?hit.clone():original(input,init);});
-  };
-}
 self.onmessage=async function(event){
   const msg=event.data||{};
   try{
     if(msg.type==='init'){
-      patchFetch(msg.cached);
+      // The two module URLs are blob URLs built from the compiler folder, so this
+      // worker never touches the network either.
       // Import the two modules actually used instead of the index.js barrel:
       // the barrel also re-exports fs_opfs.js, and something in that graph calls
       // importScripts(), which a module worker refuses.
