@@ -823,7 +823,7 @@ function renderProblems(){
     '<div class="problem-head"><span class="problem-lead '+(errors?'bad':warnings?'warn':'good')+'">'+esc(lead)+'</span>'+
     (when?'<span class="problem-when">'+esc(when)+'</span>':'')+
     '<span class="grow"></span>'+button('check-problems','重新检查','history')+'</div>'+
-    (p.status==='failed'&&p.message?'<pre class="problem-raw">'+esc(p.message)+'</pre>':'')+
+    (p.status==='failed'&&p.message&&!rows?'<pre class="problem-raw">'+esc(p.message)+'</pre>':'')+
     (rows?'<div class="problem-list">'+rows+'</div>':'<div class="problem-none">'+icon('check','green')+'这次编译没有错误，也没有警告。</div>')+
   '</section>');
 }
