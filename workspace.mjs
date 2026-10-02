@@ -37,7 +37,8 @@ const icons = {
   upload:'M12 16V3m-5 5 5-5 5 5M4 15v6h16v-6', expand:'M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5',
   ai:'m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5ZM20 2v4m-2-2h4',
   more:'M4 12h1m6 0h1m6 0h1', trash:'M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7',
-  search:'M15 15l6 6M17 9a7 7 0 1 1-14 0 7 7 0 0 1 14 0'
+  search:'M15 15l6 6M17 9a7 7 0 1 1-14 0 7 7 0 0 1 14 0',
+  warn:'M12 3 2 20h20ZM12 9v5m0 3.5v.5'
 };
 const icon = (name, cls='') => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${icons[name] || icons.doc}"/></svg>`;
 const button = (action, label, glyph, cls='', title=label) => `<button type="button" data-action="${action}" class="${cls}" title="${esc(title)}" aria-label="${esc(title)}">${glyph ? icon(glyph) : ''}${label ? `<span class="button-label">${esc(label)}</span>` : ''}</button>`;
@@ -377,7 +378,7 @@ function mount() {
         </section>
         <div class="splitter horizontal" data-resize="y" role="separator" tabindex="0" aria-label="调整编辑器高度" aria-orientation="horizontal"></div>
         <section class="panel bottom">
-          <nav class="panel-head" role="tablist"><button data-bottom="cases" role="tab" class="active">${icon('box','green')}测试用例</button><button data-bottom="results" role="tab">${icon('terminal')}测试结果</button><span class="grow"></span>${button('refresh-result','','history','','读取最新判题结果')}</nav>
+          <nav class="panel-head" role="tablist"><button data-bottom="cases" role="tab" class="active">${icon('box','green')}测试用例</button><button data-bottom="results" role="tab">${icon('terminal')}测试结果</button><button data-bottom="problems" role="tab">${icon('warn')}问题<small class="tab-count hidden" data-problem-count></small></button><span class="grow"></span>${button('refresh-result','','history','','读取最新判题结果')}</nav>
           <div class="scroll" data-bottom-body></div>
         </section>
       </div>
@@ -593,6 +594,7 @@ function editorState(value) {
           $$('[data-ai-line]').forEach(b=>b.disabled=true);
         }
         scheduleCopilot(update.view);
+        scheduleProblems();
       }
       if (update.docChanged || update.selectionSet) {
         const pos=update.state.selection.main.head,line=update.state.doc.lineAt(pos);
@@ -745,6 +747,86 @@ function resultMismatch(r){
     (judged!==null?' '+button('show-submitted','看看提交的那份'):'')+
     '</div>';
 }
+/* --------------------------------------------------------- 问题面板（自动检查） --
+ * The same thing VS Code does: after the learner stops typing, compile and list what
+ * came back. It runs quietly - a missing toolchain says so in the panel instead of
+ * opening the setup dialog - and what it finds becomes the editor's marks too.
+ */
+let problemTimer=null, problemRunning=false, problemAgain=false, problemCheckedFor=null;
+function scheduleProblems(delay=1400){
+  if(!editor||!current)return;
+  clearTimeout(problemTimer);
+  problemTimer=setTimeout(()=>{runProblems().catch(()=>{});},delay);
+}
+async function runProblems(){
+  if(!editor||!current||busy)return;
+  const source=fullCode();
+  if(source===problemCheckedFor&&current.problems)return;
+  if(problemRunning){problemAgain=true;return;}
+  problemRunning=true;
+  problemCheckedFor=source;
+  current.problems={status:'checking',issues:current.problems?.issues||[],checkedAt:current.problems?.checkedAt||0};
+  paintProblemCount();
+  if(activeBottom==='problems')renderProblems();
+  try{
+    const {warnings}=await compileC(source);
+    current.problems={status:'ok',issues:parseCompileIssues(warnings),checkedAt:Date.now()};
+  }catch(error){
+    const message=String((error&&error.message)||error);
+    if(error instanceof ToolchainError||wasmRefused(error)){
+      current.problems={status:'unavailable',issues:[],note:message,checkedAt:Date.now()};
+    }else{
+      // A build that failed is a result: its diagnostics are the point of the panel.
+      current.problems={status:'failed',issues:parseCompileIssues(message),message,checkedAt:Date.now()};
+    }
+  }
+  problemRunning=false;
+  current.compileIssues=current.problems.issues;
+  syncDiagnosis();
+  paintProblemCount();
+  if(activeBottom==='problems')renderProblems();
+  if(problemAgain){problemAgain=false;scheduleProblems(250);}
+}
+function problemCounts(){
+  const issues=current?.problems?.issues||[];
+  return {errors:issues.filter(i=>i.severity!=='warning').length,warnings:issues.filter(i=>i.severity==='warning').length,total:issues.length};
+}
+function paintProblemCount(){
+  const node=$('[data-problem-count]');
+  if(!node)return;
+  const {errors,warnings,total}=problemCounts();
+  const busyState=current?.problems?.status==='checking';
+  node.textContent=busyState?'…':(total?String(total):'');
+  node.classList.toggle('has-errors',errors>0);
+  node.classList.toggle('has-warnings',!errors&&warnings>0);
+  node.classList.toggle('hidden',!total&&!busyState);
+}
+function renderProblems(){
+  const host=$('[data-bottom-body]');
+  if(!host)return;
+  const p=current?.problems;
+  if(!p){replaceContent(host,'<div class="empty">'+icon('warn')+'改动代码后会自动编译，编译错误和警告都会列在这里。</div>');return;}
+  const {errors,warnings}=problemCounts();
+  const lead=p.status==='checking'?'正在检查…'
+    :p.status==='unavailable'?'本机编译器还没准备好，暂时无法自动检查（点「运行」可以先把编译器装好）。'
+    :p.issues.length?(errors?errors+' 个错误':'')+(errors&&warnings?'，':'')+(warnings?warnings+' 个警告':'')
+    :'没有发现问题';
+  const when=p.checkedAt?new Date(p.checkedAt).toLocaleTimeString('zh-CN',{hour12:false}):'';
+  const rows=p.issues.map(issue=>'<button type="button" class="problem-row '+(issue.severity==='warning'?'warning':'error')+'"'+
+      (issue.startLine?' data-compile-line="'+issue.startLine+'"':'')+'>'+
+      '<span class="problem-mark">'+(issue.severity==='warning'?'▲':'✕')+'</span>'+
+      '<span class="problem-msg">'+esc(issue.title)+(issue.problem?'<small>'+esc(issue.problem)+'</small>':'')+'</span>'+
+      (issue.hint?'<span class="problem-hint">'+esc(issue.hint)+'</span>':'')+
+      '<span class="problem-where">'+(issue.startLine?('第 '+issue.startLine+' 行'):(issue.prefix?'前置代码':'—'))+'</span>'+
+    '</button>').join('');
+  replaceContent(host,'<section class="problems">'+
+    '<div class="problem-head"><span class="problem-lead '+(errors?'bad':warnings?'warn':'good')+'">'+esc(lead)+'</span>'+
+    (when?'<span class="problem-when">'+esc(when)+'</span>':'')+
+    '<span class="grow"></span>'+button('check-problems','重新检查','history')+'</div>'+
+    (p.status==='failed'&&p.message?'<pre class="problem-raw">'+esc(p.message)+'</pre>':'')+
+    (rows?'<div class="problem-list">'+rows+'</div>':'<div class="problem-none">'+icon('check','green')+'这次编译没有错误，也没有警告。</div>')+
+  '</section>');
+}
 function renderResults() {
   stopWithin($('[data-bottom-body]'));
   const r=current.result;
@@ -772,7 +854,7 @@ function renderResults() {
 function switchBottom(tab) {
   activeBottom=tab;
   $$('[data-bottom]').forEach(b=>{b.classList.toggle('active',b.dataset.bottom===tab);b.setAttribute('aria-selected',String(b.dataset.bottom===tab));});
-  if (tab==='cases') renderCases(); else renderResults();
+  if (tab==='cases') renderCases(); else if (tab==='problems') renderProblems(); else renderResults();
 }
 async function switchLeft(tab) {
   activeLeft=tab;
@@ -851,6 +933,7 @@ async function loadExercise(viewURL, push=true) {
     $('[data-sample-count]').textContent=`${problem.tests.length} 个公开样例`;
     $('[data-position]').textContent=currentIndex>=0?`${currentIndex+1}/${problems.length}`:'';
     await switchLeft('description'); switchBottom('cases');
+   current.problems=null;problemCheckedFor=null;paintProblemCount();scheduleProblems(900);
   maybeOfferToolchain().catch(()=>{});
     if(push) history.pushState({workspace:true},'',problem.submitURL);
     document.title=`${problem.title} · 编程工作区`;
@@ -1246,24 +1329,16 @@ const ONLINE_COMPILER='https://wandbox.org/api/compile.json';
  */
 const ONLINE_C=['gcc-13.2.0-c','gcc-12.3.0-c','gcc-head-c'];
 /** Which of them this session has settled on. */
-const onlineCompiler={value:0};
 /**
- * The judge's dialect, read from the language Moodle itself offers.
+ * The dialect the judge actually compiles with.
  *
- * gcc-3.3 is the default of a course from 2019 and its default is gnu89: a loop that
- * declares its own counter ("for (int i = 0; ...)") is an error there, and it has to be
- * an error here too, or 运行 says yes and 提交 says no.
+ * The language is named "gcc-3.3", and its diagnostics really are that old - they use
+ * backquotes, which GCC stopped doing in 4.0. But that machine runs with C99 enabled:
+ * "for (int i = 0; ...)" is accepted there, so it must be accepted here. Being stricter
+ * than the judge is not "safe" at all - it just makes 运行 refuse code that 提交 takes.
  */
 function dialectFlags(){
-  const label=($('[data-language]')?.selectedOptions?.[0]?.textContent||'').toLowerCase();
-  // gcc rejects "for (int i = ...)" before C99, but clang only does so under
-  // -Werror=c99-extensions, so the strictness has to be asked for explicitly.
-  if(/gcc-?3\b|gcc-?2\b|gcc-?4\.[0-3]/.test(label))return['-std=gnu89','-Werror=c99-extensions'];
-  if(/gcc-?4\.[4-9]|gcc-?5\b|gcc-?6\b/.test(label))return['-std=gnu99'];
-  if(/clang/.test(label))return['-std=gnu89','-Werror=c99-extensions'];
-  // The judge could not be read. gcc-3.3 is the common case here, and being stricter
-  // than the judge is the safe direction: 运行 must not promise what 提交 refuses.
-  return['-std=gnu89','-Werror=c99-extensions'];
+  return ['-std=gnu99'];
 }
 // A path-prefix proxy can answer a third-party host with its own HTML page instead
 // of forwarding the request, so a non-JSON reply is a transport fault worth retrying;
@@ -2693,6 +2768,7 @@ async function handleClick(event) {
       traceGoto(0);
       return;
     }
+    case 'check-problems':problemCheckedFor=null;return runProblems();
     case 'show-submitted':{
       const judged=current?.result?.submittedCode;
       if(typeof judged!=='string')return toast('没有留到这次提交的代码。');

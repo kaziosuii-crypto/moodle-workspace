@@ -182,6 +182,28 @@ input,textarea,select{transition:border-color var(--t-fast) var(--ease),box-shad
 .cm-preset-line{background:#f7faff;box-shadow:inset 3px 0 #cfe0f2}
 .cm-preset-line .cm-gutterElement{color:#a9bed6}
 .submitted-code{max-height:46vh;overflow:auto;font-family:var(--font-mono);font-size:12px;line-height:1.7;background:#fafafa;border:1px solid #eee;border-radius:8px;padding:12px;white-space:pre}
+/* Problems panel: the same list VS Code shows, on every edit. */
+.tab-count{margin-left:5px;min-width:16px;padding:0 5px;border-radius:8px;background:#f0f0f2;color:#8a8a90;font-size:10px;line-height:15px;text-align:center;font-variant-numeric:tabular-nums}
+.tab-count.has-errors{background:#fdeaea;color:#c0392b}
+.tab-count.has-warnings{background:#fdf4e3;color:#9c7625}
+.problems{padding:14px 18px 18px}
+.problem-head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.problem-lead{font-size:12px;font-weight:600}
+.problem-lead.bad{color:#c0392b}.problem-lead.warn{color:#9c7625}.problem-lead.good{color:#2f855a}
+.problem-when{font-size:10px;color:#b4b4b8}
+.problem-list{display:grid;gap:2px}
+.problem-row{display:grid;grid-template-columns:16px minmax(0,1fr) auto;align-items:baseline;gap:4px 10px;width:100%;text-align:left;background:none;border:0;border-radius:6px;padding:7px 9px;cursor:pointer}
+.problem-row:hover{background:#f7f8fa}
+.problem-mark{font-size:11px;line-height:1.5}
+.problem-row.error .problem-mark{color:#d05a4b}
+.problem-row.warning .problem-mark{color:#d5a03c}
+.problem-msg{font-size:12px;color:#3f3f46;overflow-wrap:anywhere}
+.problem-row.error .problem-msg{color:#b3402f}
+.problem-msg small{display:block;margin-top:2px;color:#a0a0a6;font-size:10.5px;font-family:var(--font-mono)}
+.problem-hint{grid-column:2;font-size:10.5px;color:#9b834e;line-height:1.7}
+.problem-where{font-size:10px;color:#b0b0b6;font-variant-numeric:tabular-nums;white-space:nowrap}
+.problem-raw{font-family:var(--font-mono);font-size:11px;line-height:1.7;background:#fffafa;border:1px solid #f1dede;border-radius:8px;padding:10px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:30vh;overflow:auto;margin:0 0 12px}
+.problem-none{display:flex;align-items:center;gap:8px;font-size:12px;color:#7d9a86;padding:6px 2px}
 .result-warning button{margin-left:6px}
 .compile-warnings{display:grid;gap:10px;margin:0 0 16px}
 .compile-warnings .compile-issue{background:#fffdf7}
