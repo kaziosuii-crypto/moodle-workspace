@@ -673,7 +673,7 @@ function renderResults() {
     <div class="result-title ${good?'green':r.pending?'muted':'red'}">${good?'通过':r.compile?'编译错误':r.pending?'判题中':r.total?'未通过':'暂无结果'}<small>${r.total?`${r.passed} / ${r.total} 个用例通过`:esc(r.message)}</small></div>
     ${r.source==='previous'?'<p class="result-warning">以下为此前提交的结果，不能代表当前编辑器中的代码。</p>':''}
     ${resultMismatch(r)}
-    ${compileWarnHTML()}
+    ${r.compile?'':compileWarnHTML()}
     <div class="result-assist">${button('tutor-diagnose','分析这次结果','ai','purple')}</div>
     ${r.submitId?`<div class="submission-id">提交 #${esc(r.submitId)}</div>`:''}
     ${r.rows.length?`<div class="table-wrap"><table class="results-table"><thead><tr><th>用例</th><th>状态</th><th>用时 / 秒</th><th>内存</th></tr></thead><tbody>${r.rows.map((row,i)=>`<tr tabindex="0" data-result="${i}" class="${i===resultIndex?'selected':''}"><td>${esc(row.no)}</td><td class="${row.passed?'green':'red'}">${esc(row.verdict)}</td><td>${esc(row.time)}</td><td>${esc(row.memory)}</td></tr>`).join('')}</tbody></table></div>`:''}
@@ -1081,7 +1081,11 @@ async function refreshResult(source='previous') {
   if(busy)return;
   const id=current.id,doc=await requestDoc(activity('result.php'));
   if(id!==current.id)return;
-  current.result={...parseResult(doc,activity('result.php')),source};
+  const result=parseResult(doc,activity('result.php'));
+  // A judge compile error gets the same cards and editor marks as a local build.
+  current.compileIssues=result.compile?parseCompileIssues(result.message):[];
+  syncDiagnosis();
+  current.result={...result,source};
   switchBottom('results');
 }
 /** Newest submission id from the history list; the same ?submitid= shape in intranet and proxied deployments. */
@@ -1125,7 +1129,14 @@ async function submit() {
       await new Promise(r=>setTimeout(r,1500));
       result=parseResult(await requestDoc(resultURL),resultURL);
     }
-    if(result.finished && !result.pending){current.result={...result,submitId,source:'submitted',submittedCode:data.get('code'),uploadedFile:file?.name||''};switchBottom('results');return;}
+    if(result.finished && !result.pending){
+      // Same treatment as a local build: the diagnostics become cards and editor marks.
+      current.compileIssues=result.compile?parseCompileIssues(result.message):[];
+      syncDiagnosis();
+      current.result={...result,submitId,source:'submitted',submittedCode:data.get('code'),uploadedFile:file?.name||''};
+      switchBottom('results');
+      return;
+    }
     current.result={rows:[],total:0,pending:true,message:'尚未确认本次判题结果，请稍后刷新。'};switchBottom('results');
   } catch(e) {
     current.result={rows:[],total:0,message:e.message,compile:false};switchBottom('results');toast(e.message);

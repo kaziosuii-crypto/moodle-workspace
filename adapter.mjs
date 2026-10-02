@@ -123,6 +123,26 @@ const DIAGNOSTIC = /[\w./\\-]+\.(?:c|cc|cpp|cxx|h):\d+:(?:\d+:)?\s*(?:fatal erro
  * only the first <pre> in the main region is how "编译错误" ends up with no explanation,
  * so all of them are collected and the raw list travels with the result for the panel.
  */
+/**
+ * The text of a block, keeping the line structure the page actually shows.
+ *
+ * The programming plugin separates compiler diagnostics with <br>, and textContent
+ * glues them together: "…non-static functionmain.c:29: error…" - which makes the file
+ * name of the next diagnostic "functionmain.c" and its message start mid-word.
+ */
+function blockText(el) {
+  if (!el) return '';
+  const copy = el.cloneNode(true);
+  copy.querySelectorAll('br').forEach(node => node.replaceWith('\n'));
+  copy.querySelectorAll('p,div,li,tr,pre').forEach(node => node.append('\n'));
+  return String(copy.textContent || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function compilerBlocks(doc) {
   const seen = new Set(), blocks = [];
   const push = (value, where) => {
@@ -132,16 +152,16 @@ function compilerBlocks(doc) {
     blocks.push({ where, value: clean });
   };
   doc.querySelectorAll('textarea').forEach(node => push(node.value, 'textarea'));
-  doc.querySelectorAll('pre,code,.programming-output,.compile-output,#compilation-output,#compile-output').forEach(node => push(text(node), node.tagName.toLowerCase()));
+  doc.querySelectorAll('pre,code,.programming-output,.compile-output,#compilation-output,#compile-output').forEach(node => push(blockText(node), node.tagName.toLowerCase()));
   // Some themes print the diagnostics straight into a table cell or a bare div; those
   // leaves are only worth keeping when they actually talk about the build.
   doc.querySelectorAll('td,div').forEach(node => {
     if (node.children.length) return;
-    const value = text(node);
+    const value = blockText(node);
     if (value.length > 4000 || !/error|错误|warning|警告|失败|\.[ch]:\d/.test(value)) return;
     push(value, node.tagName.toLowerCase());
   });
-  push(text(doc.body), 'page');
+  push(blockText(doc.body), 'page');
   return blocks;
 }
 
