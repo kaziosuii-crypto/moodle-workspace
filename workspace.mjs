@@ -9,7 +9,7 @@ import css from './workspace.css';
 import { esc, text, safeURL, ioDisplay, parseProblem, parseNavigation, parseResult } from './adapter.mjs';
 import { parseCompileIssues, diffBlock, describeDiff } from './diagnostics.mjs';
 import { SANDBOX_SOURCE } from './sandbox.mjs';
-import { ToolchainError, TOOLCHAIN_SIZE, canPick, hiddenMode, wasmRefused, loadToolchain, installToolchain, grantToolchain, toolchainStatus } from './toolchain.mjs';
+import { ToolchainError, TOOLCHAIN_SIZE, canPick, hiddenMode, wasmRefused, lastIncompleteReason, loadToolchain, installToolchain, grantToolchain, toolchainStatus } from './toolchain.mjs';
 import { getKey, setKey, hasKey, maskKey } from './ai-key.mjs';
 import dagre from 'dagre';
 import cytoscape from 'cytoscape';
@@ -136,7 +136,31 @@ function dropStoredToolchain() {
   try { localStorage.removeItem('moodle-workspace:v5:c-toolchain'); localStorage.removeItem('moodle-workspace:v5:c-toolchain-dismissed'); } catch {}
   try { if (self.caches) caches.delete('moodle-workspace-c-toolchain-v1'); } catch {}
 }
-const code = () => editor?.state.doc.toString() ?? current?.draft.code ?? '';
+/**
+ * The judge's "前置代码", spliced in front of the learner's own code.
+ *
+ * It is compiled in front of the submission on this course, and it is deliberately left
+ * unfinished (an open main() to continue inside). Keeping it in the same document means
+ * the line numbers in the editor are the line numbers the judge talks about, and the
+ * learner can see that "s" already exists. It cannot be edited - only the part after it.
+ */
+const presetText = () => String(current?.problem?.preset || '');
+/** The prefix plus the newline that separates it from the code: this is the locked part. */
+function presetHeadLength() {
+  const preset = presetText();
+  return preset ? preset.replace(/\n$/, '').length + 1 : 0;
+}
+/** The document as the judge will see it. */
+function joinPreset(student) {
+  const head = presetText();
+  return head ? head.replace(/\n$/, '') + '\n' + student : student;
+}
+const fullCode = () => editor?.state.doc.toString() ?? joinPreset(current?.draft.code || '');
+/** What the learner actually wrote: submitted, saved and downloaded on its own. */
+const code = () => {
+  const text = fullCode(), end = presetHeadLength();
+  return end ? text.slice(Math.min(end, text.length)) : text;
+};
 const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)');
 const motions=new Set();
 let tutorRequest, busyMotion, completionRequest;
@@ -500,10 +524,46 @@ async function runCopilot(view,pos){
     if(token===copilot.token){copilot.controller=null;setCopilotState('');}
   }
 }
+/**
+ * Nothing may change the prefix.
+ *
+ * A change that starts inside it is moved to the boundary instead of being refused, so
+ * select-all-and-type, paste-over and 清空 still do the obvious thing: they replace the
+ * learner's own code and leave the judge's part alone.
+ */
+const presetLock = EditorState.transactionFilter.of(tr => {
+  if (!tr.docChanged) return tr;
+  const end = presetHeadLength();
+  if (!end) return tr;
+  const changes = [];
+  let clamped = false;
+  tr.changes.iterChanges((fromA, toA, fromB, toB, inserted) => {
+    if (fromA >= end) { changes.push({ from: fromA, to: toA, insert: inserted }); return; }
+    clamped = true;
+    // Starting inside but reaching past the end (select-all, paste over a selection)
+    // becomes the same edit from the boundary, so the text still lands where it was
+    // meant to. Typing while the whole prefix is selected does that too - the text is
+    // kept and the prefix is not touched. Only a deletion inside the prefix is refused.
+    if (toA > end) { changes.push({ from: end, to: toA, insert: inserted }); return; }
+    if (inserted.length) { changes.push({ from: end, to: end, insert: inserted }); return; }
+    changes.push({ from: end, to: end, insert: '' });
+  });
+  if (!clamped) return tr;
+  return { changes, selection: tr.selection, effects: tr.effects, scrollIntoView: tr.scrollIntoView };
+});
+const presetMarks = EditorView.decorations.compute(['doc'], state => {
+  const end = presetHeadLength();
+  if (!end) return Decoration.none;
+  const last = state.doc.lineAt(Math.min(end, state.doc.length)).number;
+  const ranges = [];
+  for (let n = 1; n <= last; n++) ranges.push(Decoration.line({ class: 'cm-preset-line' }).range(state.doc.line(n).from));
+  return Decoration.set(ranges);
+});
 function editorState(value) {
   const words=['int','char','float','double','long','unsigned','void','return','if','else','for','while','break','continue','struct','typedef','sizeof','const','switch','case','printf','scanf','malloc','free','strlen','main'];
-  return EditorState.create({ doc:value, extensions:[
+  return EditorState.create({ doc:joinPreset(value), extensions:[
     lineNumbers(),highlightActiveLine(),highlightActiveLineGutter(),drawSelection(),editorHistory(),cpp(),
+    presetLock,presetMarks,
     diagnosisField,ghostField,
     syntaxHighlighting(defaultHighlightStyle),indentOnInput(),bracketMatching(),closeBrackets(),foldGutter(),
     highlightSelectionMatches(),EditorView.lineWrapping,
@@ -572,7 +632,10 @@ function applyHistoryCode(source){
  */
 function presetHTML(p){
   const lines=String(p.preset||'').split('\n').length;
-  const open=/\bmain\s*\([^)]*\)\s*\{[^}]*$/.test(String(p.preset||'').replace(/\/\*[\s\S]*?\*\//g,'').replace(/\/\/[^\n]*/g,''));
+  // Strings and comments first, then a brace count: a prefix that opens main() and never
+  // closes it is the norm on this course, and that is what the note has to explain.
+  const bare=String(p.preset||'').replace(/\/\*[\s\S]*?\*\//g,'').replace(/\/\/[^\n]*/g,'').replace(/"(?:[^"\\]|\\.)*"/g,'""').replace(/'(?:[^'\\]|\\.)*'/g,"''");
+  const open=(bare.match(/\{/g)||[]).length>(bare.match(/\}/g)||[]).length;
   return '<details class="preset" open><summary>前置代码 <span class="chip">'+lines+' 行</span><small>判题机会把它拼在你的代码前面</small></summary>'+
     '<pre class="preset-code">'+esc(p.preset)+'</pre>'+
     (open?'<p class="preset-note">这段代码里的 <code>main</code> 没有闭合，是留给你往下接着写的：<b>不要再写一遍 #include 和 int main</b>，直接写里面的语句，最后补上 <code>}</code>。</p>':'')+
@@ -2126,7 +2189,7 @@ function renderTrace(){
 }
 async function startTrace(){
   if(busy)return;
-  const {source,count,lineMap}=instrument(code());
+  const {source,count,lineMap}=instrument(fullCode());
   if(!count){toast('这段代码里没有识别到可以逐行执行的语句。');return;}
   const input=current.draft.tests[testIndex]?.input ?? current.draft.tests[0]?.input ?? '';
   traceStop();
@@ -2169,33 +2232,13 @@ async function compileC(source,onProgress){
     throw error;
   }
 }
-/** The student's editor content with the judge's prefix in front of it. */
-function withPreset(source){
-  const preset=current?.problem?.preset;
-  if(!preset)return source;
-  return preset.replace(/\n$/,'')+'\n'+source;
-}
-const presetLines=()=>{ const preset=current?.problem?.preset; return preset?preset.replace(/\n$/,'').split('\n').length:0; };
-/**
- * Move the judge's line numbers back onto the editor.
- *
- * They are counted in prefix + code, so everything inside the prefix is named as such
- * and everything after it shifts up by the prefix's length.
- */
-function shiftDiagnostics(message){
-  const base=presetLines();
-  if(!base)return message;
-  return String(message||'').replace(/^([^\s:][^\s:]*):(\d+):((?:\d+:)?\s*(?:fatal error|error|warning|note):)/gm,(whole,file,line,rest)=>{
-    const n=Number(line);
-    if(!Number.isFinite(n)||n<1)return whole;
-    return n<=base ? ('前置代码:'+n+':'+rest) : (file+':'+(n-base)+':'+rest);
-  });
-}
+/** Diagnostics already count the prefix, because the editor contains it. */
+function shiftDiagnostics(message){ return message; }
 async function compileSource(compile,source){
   // -Wall, deliberately without -Werror: a warning must never stop code from running.
   // The judge's own dialect, so a program that fails there fails here the same way.
-  const {module,compileOutput}=await compile({source:withPreset(source),fileName:'main.c',flags:['-O0','-Wall',...dialectFlags()]});
-  if(!module)throw new Error(shiftDiagnostics((compileOutput||'编译失败').trim()).slice(0,4000));
+  const {module,compileOutput}=await compile({source,fileName:'main.c',flags:['-O0','-Wall',...dialectFlags()]});
+  if(!module)throw new Error((compileOutput||'编译失败').trim().slice(0,4000));
   // Warnings used to be thrown away the moment a module came back, which is exactly how
   // a missing "&" in scanf stayed invisible: it compiles clean and only warns.
   return {module,warnings:shiftDiagnostics(compileOutput||'')};
@@ -2276,6 +2319,14 @@ async function ensureSandbox(){
   if(mainThreadOnly)return null;
   if(cSandbox)return cSandbox;
   const toolchain=await loadCompiler();
+  // When the page's Content-Security-Policy blocks blob: module URLs the toolchain had
+  // to come from the CDN, and the sandbox worker cannot fetch those itself. The page can,
+  // so the run happens there instead of failing on the worker's own import.
+  if(toolchain.via==='cdn-glue'){
+    mainThreadOnly=true;
+    toast('这个页面的安全策略不允许后台线程加载编译器，已改在当前页面运行。');
+    return null;
+  }
   const sandbox=openSandbox();
   try{
     const reply=await sandbox.call({type:'init',wasi:toolchain.wasiURL,fs:toolchain.fsURL},45000);
@@ -2324,13 +2375,13 @@ function toolchainDialog(code,retry){
       action:pick?'选择文件夹并下载':'下载到浏览器存储',alt:pick?'存到浏览器里':null},
     'needs-permission':{title:'重新允许访问编译器文件夹',lead:'上次的授权已经过期，浏览器要求再确认一次才能读那些文件。',detail:'点下面的按钮，然后在浏览器的提示里选择「允许」。',action:'允许访问'},
     denied:{title:'编译器文件夹被拒绝访问',lead:'浏览器记下了「拒绝」，需要你重新指定一个文件夹。',detail:'',action:'重新选择文件夹'},
-    incomplete:{title:'编译器文件不完整',lead:'文件夹里缺少必要文件，可能是上次下载中途断了。',detail:'重新下载会覆盖这些文件。',action:'重新下载'},
+    incomplete:{title:'编译器文件不完整',lead:'文件夹里缺少必要文件，可能是上次下载中途断了。',detail:'重新下载会覆盖这些文件。',action:'重新下载',extra:lastIncompleteReason()},
     'picker-failed':{title:'打不开文件夹选择器',lead:'浏览器拒绝了这次文件夹选择。',detail:'可以改用浏览器自己的存储，不需要授权。',action:'再试一次',alt:'存到浏览器里'},
     'wasm-blocked':{title:'这个页面禁止本机编译',lead:'页面的安全策略里少了 wasm-unsafe-eval，任何跑在浏览器里的 C 编译器都会被挡下来。',detail:'这不是配置问题，只能换运行方式：代码会发到公网编译器上运行，不需要下载。',action:'改用在线编译器',alt:'知道了'},
     unsupported:{title:'这个浏览器装不了内置编译器',lead:'它既不支持文件夹访问，也没有可用的浏览器存储。',detail:'可以改用在线编译器：代码会发到公网编译器上运行，不需要下载。',action:'改用在线编译器',alt:'知道了'},
   }[code]||{title:'内置编译器不可用',lead:'',detail:'',action:'重试'};
   const m=openModal(`<header><h2>${esc(copy.title)}</h2></header>
-    <div class="dl-body"><p><strong>${esc(copy.lead)}</strong></p>${copy.detail?'<p>'+esc(copy.detail)+'</p>':''}</div>
+    <div class="dl-body"><p><strong>${esc(copy.lead)}</strong></p>${copy.detail?'<p>'+esc(copy.detail)+'</p>':''}${copy.extra?'<p class="dl-note">具体原因：'+esc(copy.extra)+'</p>':''}</div>
     <footer><button data-dl-cancel>${esc(copy.action==='改用在线编译器'?'改用在线编译器':'取消')}</button>${copy.alt&&copy.alt!=='知道了'?'<button data-dl-opfs>'+esc(copy.alt)+'</button>':''}${copy.action==='改用在线编译器'?'':'<button data-dl-start class="primary">'+esc(copy.action)+'</button>'}</footer>`);
   m.querySelector('[data-dl-cancel]').onclick=()=>{
     closeModal();
@@ -2393,7 +2444,9 @@ async function runTests() {
   if(busy)return;
   setBusy(true);saveDraft();current.compileIssues=[];syncDiagnosis();
   try {
-    const tests=structuredClone(current.draft.tests),submittedSource=code();
+    // Compile and run what the judge compiles; the submission still carries only the
+    // learner's own part, because the prefix is sent by Moodle itself.
+    const tests=structuredClone(current.draft.tests),submittedSource=fullCode();
     current.result={rows:[],total:0,passed:0,pending:true,message:prefs.runner?'正在运行自定义测试…':'正在用在线编译器运行…'};switchBottom('results');
     let results;
     // Declared out here because the warnings are shown next to the results, not here.
@@ -2418,6 +2471,9 @@ async function runTests() {
           // No folder yet, or a permission that lapsed: that is a question for the
           // learner, not a reason to quietly send their code to a public compiler.
           if(handleToolchainError(error,()=>runTests()))return;
+          // Keep the whole reason: the toast only has room for the first 60 characters,
+          // and "the built-in compiler failed" is useless without them.
+          console.warn('内置编译器不可用：'+(error&&error.stack||error));
           toast('内置编译器不可用，改用在线编译器：'+error.message.slice(0,60));
         }
       }

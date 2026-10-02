@@ -97,8 +97,8 @@ function directoryStore(dir) {
       return (await sub.getFileHandle(file)).getFile();
     },
     async readManifest() {
-      try { return JSON.parse(await (await (await folder()).getFileHandle(MANIFEST)).getFile().text()); }
-      catch { return null; }
+      const file = await (await folder()).getFileHandle(MANIFEST);
+      return JSON.parse(await (await file.getFile()).text());
     },
     async writeManifest(info) {
       const handle = await (await folder()).getFileHandle(MANIFEST, { create: true });
@@ -140,7 +140,8 @@ function idbStore() {
     },
     async readManifest() {
       const bytes = await fileRun('readonly', store => store.get(MANIFEST));
-      return bytes ? JSON.parse(await new Blob([bytes]).text()) : null;
+      if (!bytes) throw new Error('还没有 manifest.json');
+      return JSON.parse(await new Blob([bytes]).text());
     },
     async writeManifest(info) { await fileRun('readwrite', store => store.put(new TextEncoder().encode(JSON.stringify(info, null, 2)), MANIFEST)); },
   };
@@ -217,16 +218,36 @@ export async function toolchainStatus() {
   const saved = await currentStore();
   if (!saved) return 'absent';
   if (saved.kind === 'picked' && saved.permission !== 'granted') return saved.permission === 'denied' ? 'denied' : 'needs-permission';
-  return 'ready';
+  // Always verify: a remembered store can be half-written by an interrupted download,
+  // and reporting "ready" then fails later with a bare NotFoundError from the filesystem.
+  return await hasFiles(saved.store) ? 'ready' : 'incomplete';
 }
 
-async function hasFiles(store) {
+/**
+ * What is missing, or an empty string when the install is complete.
+ *
+ * "不完整" on its own is what made this loop unreadable: the learner sees the same dialog
+ * again, and nothing says whether it is the manifest, one file, or the whole folder.
+ */
+let incompleteReason = '';
+export const lastIncompleteReason = () => incompleteReason;
+async function checkFiles(store) {
+  // The manifest only records what was written; the files themselves are what matter, so
+  // a missing or unreadable manifest is reported and then ignored.
+  let note = '';
   try {
     const info = await store.readManifest();
-    if (!info || info.version !== TOOLCHAIN_VERSION) return false;
-    for (const pkg of PACKAGES) for (const name of pkg.keep) await store.read(pkg.dir + '/' + name);
-    return true;
-  } catch { return false; }
+    if (info && info.version !== TOOLCHAIN_VERSION) note = '版本不符（' + info.version + '）';
+  } catch (error) { note = 'manifest 读不到：' + String((error && error.name) || '') + ' ' + String((error && error.message) || error).slice(0, 60); }
+  for (const pkg of PACKAGES) for (const name of pkg.keep) {
+    try { await store.read(pkg.dir + '/' + name); }
+    catch { return (note ? note + '；' : '') + '缺少 ' + pkg.dir + '/' + name; }
+  }
+  return '';
+}
+async function hasFiles(store) {
+  incompleteReason = await checkFiles(store);
+  return !incompleteReason;
 }
 
 /* ------------------------------------------------------------- installing */
@@ -407,7 +428,11 @@ async function buildGraph(files) {
       text = text.split("'" + spec + "'").join("'" + url + "'").split('"' + spec + '"').join('"' + url + '"');
     }
     building.delete(path);
-    const url = URL.createObjectURL(new Blob([text], { type: 'text/javascript' }));
+    // A data: URL, not a blob: one. Moodle sends a Content-Security-Policy that allows
+    // data: scripts but blocks blob:, so a blob module cannot be imported at all there -
+    // and the shim is not always reachable from the CDN either. A data URL is allowed by
+    // both, and keeps every byte coming from the folder on disk.
+    const url = 'data:text/javascript;charset=utf-8,' + encodeURIComponent(text);
     urls.set(path, url);
     return url;
   };
@@ -435,10 +460,8 @@ export async function loadToolchain() {
   try {
     module = await import(urls.get(ENTRY));
   } catch (error) {
-    // Moodle pages commonly send a Content-Security-Policy that allows https: but not
-    // blob:, and then no blob module can be imported at all. The glue is only ~150 KB,
-    // so it is fetched from the CDN while the 70 MB of wasm and sysroot keep coming
-    // from the folder - the requests those two make are answered from disk either way.
+    // Last resort for a page that refuses data: modules too: the glue from the CDN, with
+    // the wasm and sysroot still answered from disk.
     try { module = await import(PACKAGES[0].cdn + 'index.js'); }
     catch { throw new ToolchainError('script-blocked', '这段页面不允许加载本地脚本（' + String(error && error.message || error).slice(0, 120) + '），从网络加载也失败了。'); }
     local.via = 'cdn-glue';
