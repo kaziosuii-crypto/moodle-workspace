@@ -14,7 +14,7 @@ const COMPILE_RULES = [
   [/expected '\)'/i, '这一行的括号没有配平', '检查 ( 和 ) 是否成对，常见于少写或多写了一个。'],
   [/expected '\}'|expected '\}' at end of input|end of input/i, '大括号没有闭合', '往下翻到文件末尾，确认每一个 { 都有对应的 }。'],
   [/undeclared identifier|undeclared|was not declared/i, '用到了一个没有定义的变量', '变量要先声明再使用。检查拼写，或者在使用前写成 int x; 这样的定义。'],
-  [/implicit declaration of function|call to undeclared function/i, '调用了没有声明的函数', '多半是忘了 #include：printf / scanf 要 <stdio.h>，strlen 要 <string.h>，sqrt 要 <math.h>。'],
+  [/implicit declaration of function|call to undeclared function|implicitly declaring library function/i, '函数没有声明就用了', '多半是忘了 #include：printf / scanf 要 <stdio.h>，malloc / free 要 <stdlib.h>，strlen 要 <string.h>，sqrt 要 <math.h>。'],
   // A pointer is expected where a plain value was passed. In a scanf that is the
   // missing "&", which compiles with only a warning and then writes to a stray address.
   [/format .*expects argument of type '[^']*\*'|format specifies type '[^']*\*' but the argument has type/i, '传给 scanf 的应该是地址', '多半是少写了取地址符 &，写成 scanf("%d", &x); 。变量本身只是一个数字，scanf 却把它当成内存地址去写，程序可能因此崩溃，也可能悄悄改掉别的内存。'],
@@ -23,6 +23,11 @@ const COMPILE_RULES = [
   [/lvalue required as left operand of assignment/i, '赋值号左边不能放这个东西', '= 左边必须是变量，不能写成 3 = x 或者 a + b = c。'],
   [/control reaches end of non-void function|non-void function does not return/i, '函数没有写 return', 'int main 结尾要有 return 0;，其它有返回值的函数也要保证每条分支都 return。'],
   [/may be used uninitialized|is used uninitialized|is uninitialized when used here/i, '变量没有赋初值就用了', '声明时就给个初始值，比如 int sum = 0; 再用。'],
+  // The judge here is gcc-3.3, whose default is C89: a counter declared inside the
+  // loop head is an error there, and it has to be an error in the local run too.
+  [/for' loop initial declarations|ISO C90 forbids.*for|initial declarations are only allowed|variable declarations in for loop initializers/i, '循环计数器要在外面先声明', '这台判题机是 gcc-3.3，默认 C89，for (int i = 0; ...) 这种写法它不接受。改成 int i; 先声明，再 for (i = 0; ...)。'],
+  [/declaration-after-statement|ISO C90 forbids mixed declarations/i, '变量声明要放在语句前面', 'C89 要求一个块里的变量声明都在最前面。把 int n; 这类声明提到块的顶部，别夹在语句中间。'],
+  [/implicit declaration of function 'scanf'|implicit declaration of function 'printf'/i, '忘了 #include <stdio.h>', 'printf 和 scanf 都要 #include <stdio.h>。'],
   [/comparison between pointer and integer|incompatible (integer|pointer) to (integer|pointer)/i, '类型不匹配', '把不同类型的东西直接比较或赋值了。检查是不是漏写 & 或者多写了 *。'],
   [/undefined reference to/i, '链接失败：找不到这个函数', '函数名拼错了，或者只声明了却没有写实现。'],
   [/expected declaration specifiers/i, '这里应该是类型名', 'C 语言的语句要写在函数内部，函数外面只能放声明和定义。'],
@@ -38,9 +43,9 @@ const COMPILE_RULES = [
 const COMPILE_LINE = /^([^\s:][^\s:]*):(\d+):(?:(\d+):)?\s*(fatal error|error|warning|note):\s*(.*)$/;
 const DIAGNOSTIC_START = /([^\s:][^\s:]*:\d+:(?:\d+:)?\s*(?:fatal error|error|warning|note):)/g;
 
-export function explainCompileMessage(message) {
+export function explainCompileMessage(message, severity) {
   for (const entry of COMPILE_RULES) if (entry[0].test(message)) return { title: entry[1], hint: entry[2] };
-  return { title: '编译器在这一行报了错', hint: '' };
+  return { title: severity === 'warning' ? '编译器在这一行给了个警告' : '编译器在这一行报了错', hint: '' };
 }
 
 /**
@@ -70,7 +75,12 @@ export function parseCompileIssues(output, places = null) {
     const key = kind + ':' + line + ':' + message;
     if (!Number.isFinite(line) || line < 1 || seen.has(key)) continue;
     seen.add(key);
-    const explained = explainCompileMessage(message);
+    const explained = explainCompileMessage(message, kind === 'warning' ? 'warning' : 'error');
+    // One mistake often arrives twice - an error and the warning behind it - and the
+    // same rule on the same line is one thing to fix, not two.
+    const ruleKey = line + '|' + explained.title;
+    if (seen.has(ruleKey)) continue;
+    seen.add(ruleKey);
     const short = String(file).split(/[\\/]/).pop();
     issues.push({
       startLine: line, endLine: line,

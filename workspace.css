@@ -169,6 +169,7 @@ input,textarea,select{transition:border-color var(--t-fast) var(--ease),box-shad
 .compile-issue p{font-size:12px;line-height:1.8;color:#777;margin:10px 0 0;font-family:Consolas,"Cascadia Code",monospace;overflow-wrap:anywhere}
 .compile-issue .tutor-hint{margin-top:10px}
 .compile-lead{font-size:11px;color:#aaa;margin:0 0 12px}
+.compile-source{font-size:10px;color:#b0b0b0;margin:12px 0 4px;letter-spacing:.03em}
 .compile-warnings{display:grid;gap:10px;margin:0 0 16px}
 .compile-warnings .compile-issue{background:#fffdf7}
 .compile-warnings .section-kicker{display:flex;align-items:center;gap:8px;font-size:11px;color:#9b834e;margin:0}

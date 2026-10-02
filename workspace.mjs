@@ -597,9 +597,16 @@ function compilePanel(message) {
     '<article class="compile-issue '+issue.severity+'"><header><span class="severity-dot"></span><strong>'+esc(issue.title)+
     '</strong><button data-compile-line="'+issue.startLine+'">L'+issue.startLine+'</button></header><p>'+esc(issue.problem)+'</p>'+
     (issue.hint?'<div class="tutor-hint"><span>怎么改</span>'+esc(issue.hint)+'</div>':'')+'</article>').join('')+'</div>':'';
+  // Nothing was recognised as a diagnostic: say so plainly instead of showing one
+  // sentence with no explanation, and open up everything else the page did contain.
+  const others=(current?.result?.blocks||[]).filter(block=>block.value!==message);
   return '<div class="result-detail">'+list+
-    (issues.length?'<p class="compile-lead">这些问题已经按行标在编辑器右侧，点 L 行号可以直接跳过去。</p>':'')+
+    (issues.length
+      ?'<p class="compile-lead">这些问题已经按行标在编辑器右侧，点 L 行号可以直接跳过去。</p>'
+      :'<p class="compile-lead">Moodle 这次只回了这一句，没带编译器诊断。下面是结果页上全部的文本块，可以看看判题机到底说了什么。</p>')+
     '<details class="tutor-json tutor-reveal"><summary>编译器原始输出</summary><pre>'+esc(message)+'</pre></details>'+
+    (others.length?'<details class="tutor-json tutor-reveal" open><summary>结果页上的其它文本（'+others.length+' 段）</summary>'+
+      others.slice(0,8).map(block=>'<p class="compile-source">来自 '+esc(block.where)+'</p><pre>'+esc(block.value.slice(0,4000))+'</pre>').join('')+'</details>':'')+
     '<div class="result-assist">'+button('explain-error','AI 讲讲这几个错','ai','purple')+'</div></div>';
 }
 /**
@@ -1098,6 +1105,34 @@ async function submit() {
 // permissive CORS, needs no key and no download. An in-browser LLVM toolchain
 // would be ~100 MB, which is not acceptable to fetch on demand.
 const ONLINE_COMPILER='https://wandbox.org/api/compile.json';
+/**
+ * The playground's C compilers, tried in turn.
+ *
+ * These are the "-c" ids; the plain "gcc-head" is the C++ front end and would compile
+ * the learner's C as C++, accepting code their judge rejects and rejecting code it
+ * accepts. There is deliberately no C++ fallback.
+ */
+const ONLINE_C=['gcc-13.2.0-c','gcc-12.3.0-c','gcc-head-c'];
+/** Which of them this session has settled on. */
+const onlineCompiler={value:0};
+/**
+ * The judge's dialect, read from the language Moodle itself offers.
+ *
+ * gcc-3.3 is the default of a course from 2019 and its default is gnu89: a loop that
+ * declares its own counter ("for (int i = 0; ...)") is an error there, and it has to be
+ * an error here too, or 运行 says yes and 提交 says no.
+ */
+function dialectFlags(){
+  const label=($('[data-language]')?.selectedOptions?.[0]?.textContent||'').toLowerCase();
+  // gcc rejects "for (int i = ...)" before C99, but clang only does so under
+  // -Werror=c99-extensions, so the strictness has to be asked for explicitly.
+  if(/gcc-?3\b|gcc-?2\b|gcc-?4\.[0-3]/.test(label))return['-std=gnu89','-Werror=c99-extensions'];
+  if(/gcc-?4\.[4-9]|gcc-?5\b|gcc-?6\b/.test(label))return['-std=gnu99'];
+  if(/clang/.test(label))return['-std=gnu89','-Werror=c99-extensions'];
+  // The judge could not be read. gcc-3.3 is the common case here, and being stricter
+  // than the judge is the safe direction: 运行 must not promise what 提交 refuses.
+  return['-std=gnu89','-Werror=c99-extensions'];
+}
 // A path-prefix proxy can answer a third-party host with its own HTML page instead
 // of forwarding the request, so a non-JSON reply is a transport fault worth retrying;
 // a compile error from the compiler itself is not.
@@ -1111,7 +1146,9 @@ async function runOnline(source,stdin){
       try {
         response=await fetch(ONLINE_COMPILER,{
           method:'POST',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({compiler:'gcc-head',code:source,stdin,options:'gnu17'}),
+          // A C compiler, never the C++ one: the judge compiles C, and g++ accepting
+          // what gcc rejects (or vice versa) is how 运行 and 提交 end up disagreeing.
+          body:JSON.stringify({compiler:ONLINE_C[onlineCompiler.value]||ONLINE_C[0],code:source,stdin,'compiler-option-raw':dialectFlags().join('\n')}),
           signal:AbortSignal.timeout(60000),
         });
       } catch(e) { throw new CompilerTransportError('在线编译器请求失败：'+String(e?.message||e).slice(0,80)); }
@@ -1122,8 +1159,11 @@ async function runOnline(source,stdin){
       catch { throw new CompilerTransportError('在线编译器返回了非 JSON 内容（可能被网络代理拦截）。'); }
       const compileError=(data.compiler_error||'').trim();
       // The playground itself can fail to start a container; that is not the learner's code.
-      if(compileError && /OCI runtime error|crun:|Resource temporarily unavailable|internal server error/i.test(compileError))
+      if(compileError && /OCI runtime error|crun:|Resource temporarily unavailable|internal server error/i.test(compileError)){
+        // Move to the next C compiler in the list before giving up on the service.
+        onlineCompiler.value=(onlineCompiler.value+1)%ONLINE_C.length;
         throw new CompilerTransportError('在线编译器暂时不可用（服务端资源不足）。');
+      }
       if(compileError)throw new Error(compileError.slice(0,400));
       if(data.status!=='0'&&data.program_error)throw new Error((data.program_error||'').trim().slice(0,400));
       return{stdout:data.program_output||'',stderr:data.program_error||''};
@@ -2069,7 +2109,8 @@ async function compileC(source,onProgress){
 }
 async function compileSource(compile,source){
   // -Wall, deliberately without -Werror: a warning must never stop code from running.
-  const {module,compileOutput}=await compile({source,fileName:'main.c',flags:['-O0','-Wall']});
+  // The judge's own dialect, so a program that fails there fails here the same way.
+  const {module,compileOutput}=await compile({source,fileName:'main.c',flags:['-O0','-Wall',...dialectFlags()]});
   if(!module)throw new Error((compileOutput||'编译失败').trim().slice(0,4000));
   // Warnings used to be thrown away the moment a module came back, which is exactly how
   // a missing "&" in scanf stayed invisible: it compiles clean and only warns.

@@ -103,10 +103,53 @@ export function parseResult(doc, base) {
     || [...root.querySelectorAll('a[href]')].map(a => {
       try { const p = new URL(a.getAttribute('href'),base).searchParams; return p.get('submitid') || p.get('submit'); } catch { return null; }
     }).find(Boolean) || '';
+  const blocks = compilerBlocks(doc);
   return {
     rows, submitId, passed: rows.filter(r => r.passed).length, total: rows.length,
-    status, compile, pending: /等待|正在|队列|尚未/.test(status),
-    message: compile ? text(root.querySelector('pre')) || status : status || '暂无判题记录',
+    status, compile, blocks, pending: /等待|正在|队列|尚未/.test(status),
+    message: compile ? compilerMessage(blocks, status) : status || '暂无判题记录',
     finished: rows.length > 0 || compile
   };
+}
+
+/** A gcc/clang diagnostic line, wherever the plugin happens to have printed it. */
+const DIAGNOSTIC = /[\w./\\-]+\.(?:c|cc|cpp|cxx|h):\d+:(?:\d+:)?\s*(?:fatal error|error|warning|note):/;
+
+/**
+ * Every block of text on the result page that could be the compiler's output.
+ *
+ * The programming plugin has moved this text around between versions, and the page
+ * also carries the statement and the I/O - which have their own <pre> elements. Reading
+ * only the first <pre> in the main region is how "编译错误" ends up with no explanation,
+ * so all of them are collected and the raw list travels with the result for the panel.
+ */
+function compilerBlocks(doc) {
+  const seen = new Set(), blocks = [];
+  const push = (value, where) => {
+    const clean = String(value || '').replace(/\r\n/g, '\n').trim();
+    if (!clean || clean.length > 200000 || seen.has(clean)) return;
+    seen.add(clean);
+    blocks.push({ where, value: clean });
+  };
+  doc.querySelectorAll('textarea').forEach(node => push(node.value, 'textarea'));
+  doc.querySelectorAll('pre,code,.programming-output,.compile-output,#compilation-output,#compile-output').forEach(node => push(text(node), node.tagName.toLowerCase()));
+  // Some themes print the diagnostics straight into a table cell or a bare div; those
+  // leaves are only worth keeping when they actually talk about the build.
+  doc.querySelectorAll('td,div').forEach(node => {
+    if (node.children.length) return;
+    const value = text(node);
+    if (value.length > 4000 || !/error|错误|warning|警告|失败|\.[ch]:\d/.test(value)) return;
+    push(value, node.tagName.toLowerCase());
+  });
+  push(text(doc.body), 'page');
+  return blocks;
+}
+
+/** The block that actually looks like compiler output; the status is the last resort. */
+function compilerMessage(blocks, status) {
+  const diagnostic = blocks.find(b => DIAGNOSTIC.test(b.value));
+  if (diagnostic) return diagnostic.value;
+  const small = blocks.find(b => b.value.length <= 4000 && /error:|错误：|编译失败|编译错误/.test(b.value));
+  if (small) return small.value;
+  return status || '程序编译失败。';
 }

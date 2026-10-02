@@ -14,6 +14,8 @@
  *              all, works in every modern browser, invisible to the user.
  */
 
+import { makeCompiler } from './cc.mjs';
+
 /** Where the two packages come from, and which files of each are kept. */
 const PACKAGES = [
   {
@@ -443,8 +445,12 @@ export async function loadToolchain() {
     local.wasiURL = PACKAGES[1].cdn + 'wasi.js';
     local.fsURL = PACKAGES[1].cdn + 'fs_mem.js';
   }
-  if (typeof module.compile !== 'function') throw new Error('内置编译器没有导出 compile()。');
-  loaded = { compile: module.compile, wasiURL: local.wasiURL, fsURL: local.fsURL, via: local.via };
+  if (typeof module.Clang !== 'function' || typeof module.LLD !== 'function') throw new Error('内置编译器缺少 Clang 或 LLD。');
+  // browsercc's own compile() drives clang++, which compiles the learner's C as C++.
+  // The driver in cc.mjs runs the same wasm as "clang", so the language - and therefore
+  // whether 运行 agrees with 提交 - is the judge's.
+  const sysroot = await files.get('browsercc/sysroot.tar').arrayBuffer();
+  loaded = { compile: makeCompiler(module, sysroot), wasiURL: local.wasiURL, fsURL: local.fsURL, via: local.via };
   return loaded;
 }
 
