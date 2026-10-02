@@ -9,7 +9,7 @@ import css from './workspace.css';
 import { esc, text, safeURL, ioDisplay, parseProblem, parseNavigation, parseResult } from './adapter.mjs';
 import { parseCompileIssues, diffBlock, describeDiff } from './diagnostics.mjs';
 import { SANDBOX_SOURCE } from './sandbox.mjs';
-import { ToolchainError, TOOLCHAIN_SIZE, canPick, loadToolchain, installToolchain, grantToolchain, toolchainStatus } from './toolchain.mjs';
+import { ToolchainError, TOOLCHAIN_SIZE, canPick, hiddenMode, wasmRefused, loadToolchain, installToolchain, grantToolchain, toolchainStatus } from './toolchain.mjs';
 import { getKey, setKey, hasKey, maskKey } from './ai-key.mjs';
 import dagre from 'dagre';
 import cytoscape from 'cytoscape';
@@ -45,6 +45,44 @@ const base = new URL('./', location.href).href;
 let host, root, editor, current, problems = [], currentIndex = -1, busy = false, navToken = 0, saveTimer, toastTimer, modalCleanup;
 let testIndex = 0, resultIndex = 0, activeLeft = 'description', activeBottom = 'cases';
 const prefsKey = 'moodle-workspace:v4:settings';
+/**
+ * Durable key/value storage for drafts.
+ *
+ * localStorage is capped at about 5 MB for the whole origin, and one draft carries its
+ * code plus every test case. A learner with a few hundred problems fills that up and
+ * then nothing saves any more. IndexedDB has room, works on plain http:// intranet
+ * origins, and structured-clones the draft object directly - so drafts live there and
+ * localStorage is only kept as a best-effort cache for the synchronous paths.
+ */
+const STORE_DB = 'moodle-workspace-store', STORE_NAME = 'records';
+let storePromise = null;
+function storeOpen() {
+  if (storePromise) return storePromise;
+  storePromise = new Promise((resolve, reject) => {
+    let request;
+    try { request = indexedDB.open(STORE_DB, 1); } catch (error) { reject(error); return; }
+    request.onupgradeneeded = () => request.result.createObjectStore(STORE_NAME);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('本地数据库打不开'));
+    request.onblocked = () => reject(new Error('本地数据库被另一个标签页占用'));
+  }).catch(error => { storePromise = null; throw error; });
+  return storePromise;
+}
+function storeRun(mode, work) {
+  return storeOpen().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, mode);
+    const request = work(tx.objectStore(STORE_NAME));
+    let value;
+    if (request && 'onsuccess' in request) request.onsuccess = () => { value = request.result; };
+    tx.oncomplete = () => resolve(value);
+    tx.onerror = () => reject(tx.error || new Error('本地数据库写入失败'));
+    tx.onabort = () => reject(tx.error || new Error('本地数据库写入被中断'));
+  }));
+}
+const storeSet = (key, value) => storeRun('readwrite', store => store.put(value, key));
+const storeGet = key => storeRun('readonly', store => store.get(key));
+const storeKeys = () => storeRun('readonly', store => store.getAllKeys());
+const storeRemove = key => storeRun('readwrite', store => store.delete(key));
 /** Set when the learner picks the online compiler instead of installing the built-in one. */
 const ONLINE_ONLY = 'moodle-workspace:v6:online-compiler';
 const read = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; } };
@@ -52,21 +90,28 @@ const storedPrefs=read(prefsKey,{});
 dropStoredAnalyses();
 dropStoredToolchain();
 let prefs = {enabled:storedPrefs.aiV5Enabled??true,runner:storedPrefs.runner||'',copilot:storedPrefs.copilot??true};
+let lastPersistFailure = '';
+/** Guards the draft indicator against an out-of-order database write finishing late. */
+let saveToken = 0;
 function persist(key, value) {
+  let text = '';
   try { localStorage.setItem(key, JSON.stringify(value)); return true; }
-  catch (error) {
-    // Quota is the usual failure once many drafts and AI analyses have piled up,
-    // and it also silently breaks the API key and the toolchain flag. Drop the
-    // largest reclaimable entries (saved AI analyses) and try once more.
-    const text=String(error&&error.name)+' '+String(error&&error.message);
-    if(!/quota|exceed|full/i.test(text))return false;
-    try {
-      const tutors=Object.keys(localStorage).filter(k=>k.includes(':tutor:'));
-      for(const stale of tutors.slice(0,60))localStorage.removeItem(stale);
-      localStorage.setItem(key,JSON.stringify(value));
-      return true;
-    } catch { return false; }
-  }
+  catch (error) { text = String(error && error.name) + ' ' + String(error && error.message); }
+  if (!/quota|exceed|full/i.test(text)) { lastPersistFailure = 'blocked'; return false; }
+  lastPersistFailure = 'quota';
+  // Reclaim in order of what is cheapest to lose: the AI analyses were never worth
+  // their footprint, and old drafts are already in the database by now.
+  try {
+    for (const stale of Object.keys(localStorage)) if (stale.includes(':tutor:')) localStorage.removeItem(stale);
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch {}
+  try {
+    for (const other of Object.keys(localStorage)) if (other.includes(':v4:') && other !== key) localStorage.removeItem(other);
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch {}
+  return false;
 }
 /** True when this browser refuses site data outright, rather than just being full. */
 function storageBlocked() {
@@ -242,8 +287,25 @@ function saveDraft() {
   current.form.querySelector('textarea[name=code]').value=current.draft.code;
   const original=document.querySelector('textarea[name=code]#edit-code');
   if(original?.form?.querySelector('[name=a]')?.value===current.id)original.value=current.draft.code;
-  const ok=persist(draftKey(current.id),current.draft);
-  $('[data-save]').textContent=ok?'已存储':(storageBlocked()?'浏览器禁止了站点数据（草稿与密钥无法保存）':'草稿未能保存（浏览器存储不可用）');
+  // localStorage first: it is synchronous, so the cache is warm for anything that
+  // reads it before the database round-trip finishes.
+  const cached=persist(draftKey(current.id),current.draft);
+  const label=$('[data-save]');
+  const key=draftKey(current.id);
+  if(label){label.textContent=cached?'已存储':'正在存入本地数据库…';}
+  const token=++saveToken;
+  storeSet(key,current.draft).then(()=>{
+    if(token!==saveToken||label!==$('[data-save]'))return;
+    label.textContent='已存储';
+  }).catch(error=>{
+    // Worth a console line: a silent failure here looks exactly like "the draft saved".
+    console.warn('draft store failed:',String(error&&error.name||'')+' '+String(error&&error.message||error));
+    if(token!==saveToken||label!==$('[data-save]'))return;
+    if(cached){label.textContent='已缓存，本地数据库不可用';return;}
+    label.textContent=lastPersistFailure==='quota'
+      ?'本机存储已满，草稿没能保存'
+      :(storageBlocked()?'浏览器禁止了站点数据（草稿与密钥无法保存）':'草稿未能保存（浏览器存储不可用）');
+  });
 }
 function setBusy(value) {
   busy=value;
@@ -633,7 +695,14 @@ async function loadExercise(viewURL, push=true) {
     if (nav.length) problems=nav;
     const old=read(`moodle-ide:v3:${new URL(problem.submitURL).origin}${new URL(problem.submitURL).pathname}${new URL(problem.submitURL).search}`,{});
     saveDraft();
-    const draft=read(draftKey(id),{code:old.code ?? form.querySelector('textarea[name=code]').value,tests:problem.tests.map(t=>({...t,source:'公开样例'}))});
+    // The database is authoritative; localStorage is the older copy kept in step for
+    // the synchronous paths, so it is only used when there is nothing to read back.
+    const cachedDraft=read(draftKey(id),null);
+    const storedDraft=await storeGet(draftKey(id)).catch(()=>null);
+    const fallback={code:old.code ?? form.querySelector('textarea[name=code]').value,tests:problem.tests.map(t=>({...t,source:'公开样例'}))};
+    const draft=storedDraft||cachedDraft||fallback;
+    // Anything found only in the cache is moved across on the spot.
+    if(!storedDraft&&cachedDraft)storeSet(draftKey(id),cachedDraft).catch(()=>{});
     if (!Array.isArray(draft.tests)) draft.tests=problem.tests.map(t=>({...t,source:'公开样例'}));
     // The cases shipped with the problem are permanent: they are always restored if missing.
     problem.tests.forEach(sample=>{
@@ -1991,6 +2060,14 @@ async function startTrace(){
 async function compileC(source,onProgress){
   const {compile}=await loadCompiler(onProgress);
   onProgress?.('正在编译…');
+  try{ return await compileSource(compile,source); }
+  catch(error){
+    // A page that refuses to compile WebAssembly cannot run any in-browser C compiler.
+    if(wasmRefused(error))throw new ToolchainError('wasm-blocked','这个页面用 Content-Security-Policy 禁止了本机编译 WebAssembly。');
+    throw error;
+  }
+}
+async function compileSource(compile,source){
   // -Wall, deliberately without -Werror: a warning must never stop code from running.
   const {module,compileOutput}=await compile({source,fileName:'main.c',flags:['-O0','-Wall']});
   if(!module)throw new Error((compileOutput||'编译失败').trim().slice(0,4000));
@@ -2040,7 +2117,38 @@ function openSandbox(){
     close(){try{worker.terminate();}catch{}URL.revokeObjectURL(url);}
   };
 }
+let mainThreadOnly=false;
+/**
+ * Run the compiled module on the page's own thread.
+ *
+ * A Content-Security-Policy that allows https: but not blob: also blocks the worker,
+ * which is created from a blob, so the sandbox cannot start at all. The instrumented
+ * trace still bounds itself with its step ceiling; an ordinary run of a runaway
+ * program will freeze the page, which is why this is the fallback and not the plan.
+ */
+async function runOnMainThread(module,stdin){
+  const toolchain=await loadCompiler();
+  const [wasiModule,fsModule]=await Promise.all([import(toolchain.wasiURL),import(toolchain.fsURL)]);
+  const WASI=wasiModule.WASI||wasiModule.default;
+  const {OpenFile,File,ConsoleStdout}=fsModule;
+  const decode=new TextDecoder();
+  let out='',err='';
+  const fds=[
+    new OpenFile(new File(new TextEncoder().encode(stdin||'')),'stdin'),
+    new ConsoleStdout(buffer=>{out+=typeof buffer==='string'?buffer:decode.decode(buffer);}),
+    new ConsoleStdout(buffer=>{err+=typeof buffer==='string'?buffer:decode.decode(buffer);})
+  ];
+  const wasi=new WASI(['main'],{},fds,[]);
+  try{
+    const instance=await WebAssembly.instantiate(module,{wasi_snapshot_preview1:wasi.wasiImport});
+    wasi.start(instance.instance||instance);
+  }catch(error){
+    if(!/WASIProcExit/.test(String(error)))throw error;
+  }
+  return{stdout:out,stderr:err};
+}
 async function ensureSandbox(){
+  if(mainThreadOnly)return null;
   if(cSandbox)return cSandbox;
   const toolchain=await loadCompiler();
   const sandbox=openSandbox();
@@ -2050,15 +2158,18 @@ async function ensureSandbox(){
   }
   catch(error){
     sandbox.close();
-    // Name the actual failure: a blocked worker, a blocked module import, or a
-    // slow network are three different problems with three different fixes.
-    throw new Error('无法启动执行沙箱（'+(error.timeout?'等待 45 秒仍未就绪':error.message)+'）');
+    // A worker from a blob URL is the first thing a strict Content-Security-Policy
+    // takes away. Rather than fail the run, move to the page's own thread and say so.
+    mainThreadOnly=true;
+    toast('这个页面不允许后台线程，已改在当前页面运行；代码如果死循环，页面会卡住。');
+    return null;
   }
   cSandbox=sandbox;
   return cSandbox;
 }
 async function runCModule(module,stdin){
   const sandbox=await ensureSandbox();
+  if(!sandbox)return runOnMainThread(module,stdin);
   let reply;
   try{reply=await sandbox.call({type:'run',module,stdin},RUN_TIMEOUT_MS);}
   catch(error){
@@ -2081,27 +2192,28 @@ async function runCModule(module,stdin){
  * than from the `运行` that noticed the problem.
  */
 function toolchainDialog(code,retry){
-  const pick=canPick();
+  const pick=canPick(),hidden=hiddenMode();
   const copy={
     absent:{title:'需要内置 C 编译器',lead:'在线调试要用本机编译代码。编译器（'+TOOLCHAIN_SIZE+'）只下载一次，之后一直用这些文件。',
-      detail:pick?'推荐选一个文件夹存下来，文件你能直接看到、也能自己删；不想授权的话，也可以放进浏览器自己的存储里。':'这个浏览器不能选文件夹，编译器会放进浏览器自己的存储里，同样只需要一次。',
+      detail:pick?'推荐选一个文件夹存下来，文件你能直接看到、也能自己删；不想授权的话，也可以放进浏览器自己的存储里。':'这个页面不能选文件夹（需要 https），编译器会直接放进浏览器自己的存储里，同样只需要一次。',
       action:pick?'选择文件夹并下载':'下载到浏览器存储',alt:pick?'存到浏览器里':null},
     'needs-permission':{title:'重新允许访问编译器文件夹',lead:'上次的授权已经过期，浏览器要求再确认一次才能读那些文件。',detail:'点下面的按钮，然后在浏览器的提示里选择「允许」。',action:'允许访问'},
     denied:{title:'编译器文件夹被拒绝访问',lead:'浏览器记下了「拒绝」，需要你重新指定一个文件夹。',detail:'',action:'重新选择文件夹'},
     incomplete:{title:'编译器文件不完整',lead:'文件夹里缺少必要文件，可能是上次下载中途断了。',detail:'重新下载会覆盖这些文件。',action:'重新下载'},
     'picker-failed':{title:'打不开文件夹选择器',lead:'浏览器拒绝了这次文件夹选择。',detail:'可以改用浏览器自己的存储，不需要授权。',action:'再试一次',alt:'存到浏览器里'},
+    'wasm-blocked':{title:'这个页面禁止本机编译',lead:'页面的安全策略里少了 wasm-unsafe-eval，任何跑在浏览器里的 C 编译器都会被挡下来。',detail:'这不是配置问题，只能换运行方式：代码会发到公网编译器上运行，不需要下载。',action:'改用在线编译器',alt:'知道了'},
     unsupported:{title:'这个浏览器装不了内置编译器',lead:'它既不支持文件夹访问，也没有可用的浏览器存储。',detail:'可以改用在线编译器：代码会发到公网编译器上运行，不需要下载。',action:'改用在线编译器',alt:'知道了'},
   }[code]||{title:'内置编译器不可用',lead:'',detail:'',action:'重试'};
   const m=openModal(`<header><h2>${esc(copy.title)}</h2></header>
     <div class="dl-body"><p><strong>${esc(copy.lead)}</strong></p>${copy.detail?'<p>'+esc(copy.detail)+'</p>':''}</div>
-    <footer><button data-dl-cancel>${esc(code==='unsupported'?'改用在线编译器':'取消')}</button>${code!=='unsupported'&&copy.alt?'<button data-dl-opfs>'+esc(copy.alt)+'</button>':''}${code==='unsupported'?'':'<button data-dl-start class="primary">'+esc(copy.action)+'</button>'}</footer>`);
+    <footer><button data-dl-cancel>${esc(copy.action==='改用在线编译器'?'改用在线编译器':'取消')}</button>${copy.alt&&copy.alt!=='知道了'?'<button data-dl-opfs>'+esc(copy.alt)+'</button>':''}${copy.action==='改用在线编译器'?'':'<button data-dl-start class="primary">'+esc(copy.action)+'</button>'}</footer>`);
   m.querySelector('[data-dl-cancel]').onclick=()=>{
     closeModal();
     // "改用在线编译器" is a choice the run should remember, not a dismissal.
-    if(code==='unsupported'){persist(ONLINE_ONLY,true);toast('已改用在线编译器。');retry&&retry();}
+    if(code==='unsupported'||code==='wasm-blocked'){persist(ONLINE_ONLY,true);toast('已改用在线编译器。');retry&&retry();}
   };
   // Nothing to download here: the only useful button is the one that switches backend.
-  if(code==='unsupported')return;
+  if(code==='unsupported'||code==='wasm-blocked')return;
   const start=async(mode)=>{
     m.querySelector('.dl-body').innerHTML=ringHTML(0)+'<p class="dl-note">正在准备编译器，请保持页面打开…</p>';
     m.querySelector('footer').innerHTML='';
@@ -2123,13 +2235,13 @@ function toolchainDialog(code,retry){
       m.querySelector('.dl-body').innerHTML='<p><strong>没有成功</strong></p><p>'+esc(String(error&&error.message||error))+'</p>';
       m.querySelector('footer').innerHTML='<button data-dl-cancel>关闭</button><button data-dl-opfs>存到浏览器里</button><button data-dl-start class="primary">重试</button>';
       m.querySelector('[data-dl-cancel]').onclick=()=>closeModal();
-      m.querySelector('[data-dl-opfs]').onclick=()=>start('opfs');
-      m.querySelector('[data-dl-start]').onclick=()=>start(mode);
+      m.querySelector('[data-dl-opfs]').onclick=()=>start(hidden);
+      m.querySelector('[data-dl-start]').onclick=()=>start(mode||hidden);
     }
   };
   m.querySelector('[data-dl-start]').onclick=()=>start(null);
-  const opfs=m.querySelector('[data-dl-opfs]');
-  if(opfs)opfs.onclick=()=>start('opfs');
+  const hiddenButton=m.querySelector('[data-dl-opfs]');
+  if(hiddenButton)hiddenButton.onclick=()=>start(hidden);
 }
 function ringHTML(percent){
   const r=26,c=2*Math.PI*r;
@@ -2242,15 +2354,22 @@ async function explainCompileErrors() {
 /* ------------------------------------------------------------------ export
  * Everything the workspace keeps locally, gathered into one portable archive.
  */
-function collectArchive() {
+async function collectArchive() {
   const draftPrefix='moodle-workspace:v4:'+location.origin+':';
-  const entries=[];
+  const drafts=new Map();
   for(const key of Object.keys(localStorage)){
     if(!key.startsWith(draftPrefix))continue;
-    const id=key.slice(draftPrefix.length);
-    let draft=null;
-    try{draft=JSON.parse(localStorage.getItem(key));}catch{continue;}
-    if(!draft||typeof draft!=='object')continue;
+    try{const cached=JSON.parse(localStorage.getItem(key));if(cached&&typeof cached==='object')drafts.set(key.slice(draftPrefix.length),cached);}catch{}
+  }
+  try {
+    for(const key of await storeKeys()){
+      if(typeof key!=='string'||!key.startsWith(draftPrefix))continue;
+      const stored=await storeGet(key);
+      if(stored&&typeof stored==='object')drafts.set(key.slice(draftPrefix.length),stored);
+    }
+  } catch {}
+  const entries=[];
+  for(const [id,draft] of drafts){
     const meta=problems.find(p=>{try{return new URL(p.url).searchParams.get('a')===id;}catch{return false;}});
     entries.push({
       id,title:String(draft.title||meta?.title||('题目 '+id)),url:meta?.url||'',
@@ -2290,16 +2409,16 @@ function downloadText(name,text,type) {
   root.append(link);link.click();
   setTimeout(()=>{link.remove();URL.revokeObjectURL(url);},4000);
 }
-function openExport() {
-  const archive=collectArchive();
+async function openExport() {
   const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+  const archive=collectArchive();
   const cases=archive.problems.reduce((sum,item)=>sum+item.tests.length,0);
   const m=openModal('<header><h2>导出工作区</h2><button data-close aria-label="关闭">'+icon('close')+'</button></header>'+
     '<p class="hint">把本机保存的草稿和用例打包带走。换电脑或清理浏览器数据后都能恢复。AI 分析只留在当前页面，不会存进本机。</p>'+
     '<div class="facts"><span>'+archive.problemCount+' 道题有草稿</span><span>'+cases+' 个用例</span></div>'+
     '<footer><button data-close>取消</button><button data-export="json" class="primary">导出 JSON</button><button data-export="md">导出 Markdown</button></footer>');
-  const save=format=>{
-    const fresh=collectArchive();
+  const save=async format=>{
+    const fresh=await collectArchive();
     if(!fresh.problemCount){toast('还没有任何草稿可以导出。');return;}
     if(format==='md')downloadText('moodle-workspace-'+stamp+'.md',archiveMarkdown(fresh),'text/markdown');
     else downloadText('moodle-workspace-'+stamp+'.json',JSON.stringify(fresh,null,2),'application/json');

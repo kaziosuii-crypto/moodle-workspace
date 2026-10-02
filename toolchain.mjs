@@ -19,9 +19,12 @@ const PACKAGES = [
   {
     dir: 'browsercc',
     label: '编译器本体',
+    cdn: 'https://cdn.jsdelivr.net/npm/browsercc@0.1.1/dist/',
+    // The mirror first: it is the same package and far quicker from a Chinese
+    // network, which is where the 110 MB download actually has to happen.
     sources: [
-      'https://registry.npmjs.org/browsercc/-/browsercc-0.1.1.tgz',
       'https://registry.npmmirror.com/browsercc/-/browsercc-0.1.1.tgz',
+      'https://registry.npmjs.org/browsercc/-/browsercc-0.1.1.tgz',
     ],
     prefix: 'package/dist/',
     keep: ['index.js', 'clang.js', 'lld.js', 'clang.wasm', 'lld.wasm', 'sysroot.tar', 'stdc++.h.pch'],
@@ -29,9 +32,10 @@ const PACKAGES = [
   {
     dir: 'wasi',
     label: '运行库',
+    cdn: 'https://cdn.jsdelivr.net/npm/@bjorn3/browser_wasi_shim@0.4.2/dist/',
     sources: [
-      'https://registry.npmjs.org/@bjorn3/browser_wasi_shim/-/browser_wasi_shim-0.4.2.tgz',
       'https://registry.npmmirror.com/@bjorn3/browser_wasi_shim/-/browser_wasi_shim-0.4.2.tgz',
+      'https://registry.npmjs.org/@bjorn3/browser_wasi_shim/-/browser_wasi_shim-0.4.2.tgz',
     ],
     prefix: 'package/dist/',
     keep: ['index.js', 'wasi.js', 'fd.js', 'fs_mem.js', 'fs_opfs.js', 'strace.js', 'wasi_defs.js', 'debug.js'],
@@ -57,9 +61,90 @@ export class ToolchainError extends Error {
 
 export const canPick = () => typeof self !== 'undefined' && typeof self.showDirectoryPicker === 'function';
 const canUseStorage = () => typeof navigator !== 'undefined' && !!(navigator.storage && navigator.storage.getDirectory);
-export const supported = () => canPick() || canUseStorage();
+/** IndexedDB is the one store every environment has, https or plain http. */
+const canUseIndexedDB = () => { try { return typeof indexedDB !== 'undefined' && !!indexedDB; } catch { return false; } };
+export const supported = () => canUseIndexedDB();
+/** The store that needs nothing from the user: OPFS where it exists, else IndexedDB. */
+export const hiddenMode = () => canUseStorage() ? 'opfs' : 'idb';
 
-/* --------------------------------------------------------------- the folder */
+/* --------------------------------------------------------------- the stores */
+
+/**
+ * Where the compiler files live.
+ *
+ * A picked folder and OPFS are both directory handles and share one implementation.
+ * Both need a secure context, though, and the intranet copy of Moodle is served over
+ * plain http:// where neither exists - so IndexedDB, which has no such restriction,
+ * holds the same files as a third home.
+ */
+function directoryStore(dir) {
+  const cut = path => [path.slice(0, path.indexOf('/')), path.slice(path.indexOf('/') + 1)];
+  const folder = () => dir.getDirectoryHandle(TOOLCHAIN_FOLDER, { create: true });
+  return {
+    async write(path, bytes) {
+      const [name, file] = cut(path);
+      const sub = await (await folder()).getDirectoryHandle(name, { create: true });
+      const handle = await sub.getFileHandle(file, { create: true });
+      const writable = await handle.createWritable();
+      await writable.write(bytes);
+      await writable.close();
+    },
+    async read(path) {
+      const [name, file] = cut(path);
+      const sub = await (await folder()).getDirectoryHandle(name);
+      return (await sub.getFileHandle(file)).getFile();
+    },
+    async readManifest() {
+      try { return JSON.parse(await (await (await folder()).getFileHandle(MANIFEST)).getFile().text()); }
+      catch { return null; }
+    },
+    async writeManifest(info) {
+      const handle = await (await folder()).getFileHandle(MANIFEST, { create: true });
+      const writable = await handle.createWritable();
+      await writable.write(JSON.stringify(info, null, 2));
+      await writable.close();
+    },
+  };
+}
+const FILE_DB = 'moodle-workspace-toolchain', FILE_STORE = 'files';
+let filePromise = null;
+function fileDB() {
+  if (filePromise) return filePromise;
+  filePromise = new Promise((resolve, reject) => {
+    let request;
+    try { request = indexedDB.open(FILE_DB, 1); } catch (error) { reject(error); return; }
+    request.onupgradeneeded = () => request.result.createObjectStore(FILE_STORE);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('本地数据库打不开'));
+  }).catch(error => { filePromise = null; throw error; });
+  return filePromise;
+}
+function fileRun(mode, work) {
+  return fileDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(FILE_STORE, mode);
+    const request = work(tx.objectStore(FILE_STORE));
+    tx.oncomplete = () => resolve(request && request.result);
+    tx.onerror = () => reject(tx.error || new Error('本地数据库读写失败'));
+    tx.onabort = () => reject(tx.error || new Error('本地数据库读写被中断'));
+  }));
+}
+function idbStore() {
+  return {
+    async write(path, bytes) { await fileRun('readwrite', store => store.put(bytes, path)); },
+    async read(path) {
+      const bytes = await fileRun('readonly', store => store.get(path));
+      if (!bytes) throw new Error('内置编译器缺少文件：' + path);
+      return new Blob([bytes]);
+    },
+    async readManifest() {
+      const bytes = await fileRun('readonly', store => store.get(MANIFEST));
+      return bytes ? JSON.parse(await new Blob([bytes]).text()) : null;
+    },
+    async writeManifest(info) { await fileRun('readwrite', store => store.put(new TextEncoder().encode(JSON.stringify(info, null, 2)), MANIFEST)); },
+  };
+}
+
+/* ---------------------------------------------------------- remembering it */
 
 const DB_NAME = 'moodle-workspace-fs', STORE = 'handles', KEY = 'toolchain';
 function idb() {
@@ -91,25 +176,31 @@ async function idbSave(value) {
   } catch { /* a lost handle only costs one more pick */ }
 }
 
-/** The directory that holds (or will hold) "moodle-workspace-toolchain". */
-async function savedDirectory() {
+/**
+ * The store in use right now, or null.
+ *
+ * A picked folder is remembered by handle and needs its permission renewed; OPFS and
+ * IndexedDB are always reachable, so they are looked at directly instead of being
+ * remembered - losing the record then costs nothing.
+ */
+async function currentStore() {
   const saved = await idbGet();
-  // A picked folder is remembered by handle and needs its permission renewed; the
-  // browser's own storage is always reachable, so it is looked at directly instead of
-  // being remembered. Losing the record then costs nothing.
   if (saved && saved.kind === 'picked') {
     const permission = saved.dir.queryPermission ? await saved.dir.queryPermission({ mode: 'readwrite' }).catch(() => 'denied') : 'granted';
-    return { kind: 'picked', dir: saved.dir, permission };
+    return { kind: 'picked', dir: saved.dir, permission, store: directoryStore(saved.dir) };
   }
   if (canUseStorage()) {
     const dir = await navigator.storage.getDirectory();
-    if ((saved && saved.kind === 'opfs') || await hasFiles(dir)) return { kind: 'opfs', dir };
+    const store = directoryStore(dir);
+    if ((saved && saved.kind === 'opfs') || await hasFiles(store)) return { kind: 'opfs', dir, store };
   }
+  const store = idbStore();
+  if (canUseIndexedDB() && await hasFiles(store)) return { kind: 'idb', store };
   return null;
 }
 
 export async function savedKind() {
-  const saved = await savedDirectory();
+  const saved = await currentStore();
   return saved ? saved.kind : null;
 }
 
@@ -121,21 +212,17 @@ export async function savedKind() {
  */
 export async function toolchainStatus() {
   if (!supported()) return 'unsupported';
-  const saved = await savedDirectory();
+  const saved = await currentStore();
   if (!saved) return 'absent';
   if (saved.kind === 'picked' && saved.permission !== 'granted') return saved.permission === 'denied' ? 'denied' : 'needs-permission';
-  return await hasFiles(saved.dir) ? 'ready' : 'incomplete';
+  return 'ready';
 }
 
-async function hasFiles(dir) {
+async function hasFiles(store) {
   try {
-    const root = await dir.getDirectoryHandle(TOOLCHAIN_FOLDER);
-    const manifest = await (await root.getFileHandle(MANIFEST)).getFile();
-    if (JSON.parse(await manifest.text()).version !== TOOLCHAIN_VERSION) return false;
-    for (const pkg of PACKAGES) {
-      const sub = await root.getDirectoryHandle(pkg.dir);
-      for (const name of pkg.keep) await sub.getFileHandle(name);
-    }
+    const info = await store.readManifest();
+    if (!info || info.version !== TOOLCHAIN_VERSION) return false;
+    for (const pkg of PACKAGES) for (const name of pkg.keep) await store.read(pkg.dir + '/' + name);
     return true;
   } catch { return false; }
 }
@@ -178,8 +265,7 @@ async function untarGz(buffer) {
 }
 
 /** Download the compiler into a directory and remember where it went. */
-async function installInto(dir, kind, onProgress) {
-  const root = await dir.getDirectoryHandle(TOOLCHAIN_FOLDER, { create: true });
+async function installInto(store, kind, onProgress) {
   let lastError;
   for (const source of [0, 1]) {
     try {
@@ -189,52 +275,51 @@ async function installInto(dir, kind, onProgress) {
         const span = 0.94 / PACKAGES.length;
         const tarball = await pullTarball(pkg.sources[source], pkg.label, onProgress, at, span);
         at += span;
-        const sub = await root.getDirectoryHandle(pkg.dir, { create: true });
         for (const name of pkg.keep) {
           const bytes = tarball[pkg.prefix + name];
           if (!bytes) throw new Error('安装包里缺少 ' + pkg.prefix + name);
-          const handle = await sub.getFileHandle(name, { create: true });
-          const writable = await handle.createWritable();
-          await writable.write(bytes);
-          await writable.close();
+          await store.write(pkg.dir + '/' + name, bytes);
           written.push({ path: pkg.dir + '/' + name, bytes: bytes.length });
         }
         onProgress(0.94 * (index + 1) / PACKAGES.length, '正在写入' + pkg.label + '…');
       }
-      const manifest = await root.getFileHandle(MANIFEST, { create: true });
-      const writable = await manifest.createWritable();
-      await writable.write(JSON.stringify({ version: TOOLCHAIN_VERSION, kind, at: Date.now(), files: written }, null, 2));
-      await writable.close();
+      await store.writeManifest({ version: TOOLCHAIN_VERSION, kind, at: Date.now(), files: written });
       onProgress(1, '安装完成');
-      await idbSave({ kind, dir });
-      return readToolchain(root);
+      return readToolchain(store);
     } catch (error) { lastError = error; }
   }
   throw new ToolchainError('download-failed', '下载失败：' + String(lastError && lastError.message || lastError) + '。可以换个网络再试一次。');
 }
 
 /**
- * Ask for a folder and fill it, or fall back to the browser's own storage.
+ * Put the compiler somewhere it will still be next time.
  *
- * "picked" needs a real click; it is the mode where the learner can see the files.
+ * "picked" is the one the learner can see on disk and needs a real click; the other two
+ * are invisible but need nothing from them at all.
  */
 export async function installToolchain(onProgress = () => {}, mode = null) {
-  if (!supported()) throw new ToolchainError('unsupported', '这个浏览器既没有文件夹访问，也没有浏览器存储，装不了编译器。');
-  // Re-installing where the files already live beats asking for the folder again: the
-  // only thing that changed is that the last download did not finish.
-  const existing = await savedDirectory();
+  if (!supported()) throw new ToolchainError('unsupported', '这个浏览器没有可用的本地存储，装不了编译器。');
+  // Re-installing where the files already live beats asking again: the only thing that
+  // changed is that the last download did not finish.
+  const existing = await currentStore();
   if (!mode && existing) {
     if (existing.kind === 'picked' && existing.permission !== 'granted' && existing.dir.requestPermission) {
       const state = await existing.dir.requestPermission({ mode: 'readwrite' }).catch(() => 'denied');
       if (state !== 'granted') throw new ToolchainError('denied', '没有拿到文件夹的访问权限。');
     }
-    return installInto(existing.dir, existing.kind, onProgress);
+    return installInto(existing.store, existing.kind, onProgress);
   }
-  const wanted = mode || (canPick() ? 'picked' : 'opfs');
+  const wanted = mode || (canPick() ? 'picked' : (canUseStorage() ? 'opfs' : 'idb'));
   if (wanted === 'opfs') {
-    if (!canUseStorage()) throw new ToolchainError('unsupported', '这个浏览器没有可用的本地存储。');
+    if (!canUseStorage()) throw new ToolchainError('unsupported', '这个浏览器没有自己的文件系统。');
     onProgress(0, '正在准备浏览器存储…');
-    return installInto(await navigator.storage.getDirectory(), 'opfs', onProgress);
+    return installInto(directoryStore(await navigator.storage.getDirectory()), 'opfs', onProgress);
+  }
+  if (wanted === 'idb') {
+    if (!canUseIndexedDB()) throw new ToolchainError('unsupported', '这个浏览器没有可用的本地数据库。');
+    onProgress(0, '正在准备本地数据库…');
+    await idbSave({ kind: 'idb' });
+    return installInto(idbStore(), 'idb', onProgress);
   }
   let picked;
   try {
@@ -245,14 +330,15 @@ export async function installToolchain(onProgress = () => {}, mode = null) {
     if (String(error && error.name) === 'AbortError') throw new ToolchainError('cancelled', '已取消选择文件夹。');
     throw new ToolchainError('picker-failed', '打不开文件夹选择器：' + String(error && error.message || error));
   }
-  return installInto(picked, 'picked', onProgress);
+  await idbSave({ kind: 'picked', dir: picked });
+  return installInto(directoryStore(picked), 'picked', onProgress);
 }
 
 /** Re-grant access to a folder that was already chosen. Needs a click as well. */
 export async function grantToolchain() {
   const saved = await idbGet();
   if (!saved) throw new ToolchainError('absent', '还没有选择过编译器文件夹。');
-  if (saved.kind === 'opfs') return null;
+  if (saved.kind !== 'picked') return null;
   let state;
   try { state = await saved.dir.requestPermission({ mode: 'readwrite' }); }
   catch (error) { throw new ToolchainError('denied', String(error && error.message || error)); }
@@ -260,13 +346,10 @@ export async function grantToolchain() {
   return null;
 }
 
-/** Everything under the toolchain folder, keyed "browsercc/clang.wasm". */
-async function readToolchain(root) {
+/** Every compiler file, keyed "browsercc/clang.wasm". */
+async function readToolchain(store) {
   const files = new Map();
-  for (const pkg of PACKAGES) {
-    const dir = await root.getDirectoryHandle(pkg.dir);
-    for (const name of pkg.keep) files.set(pkg.dir + '/' + name, await (await dir.getFileHandle(name)).getFile());
-  }
+  for (const pkg of PACKAGES) for (const name of pkg.keep) files.set(pkg.dir + '/' + name, await store.read(pkg.dir + '/' + name));
   return files;
 }
 
@@ -282,12 +365,22 @@ let fetchPatched = false;
 function patchFetch(files) {
   if (fetchPatched) return;
   fetchPatched = true;
+  // Two shapes have to be answered from disk: the virtual URLs the rewritten module
+  // text asks for, and the real CDN URLs. The second one matters when a page's
+  // Content-Security-Policy allows https: but not blob:, which forces the glue to be
+  // loaded from the CDN - its own wasm and sysroot requests still land here.
+  const byURL = new Map();
+  for (const [path, file] of files) {
+    byURL.set(VIRTUAL + path, file);
+    const [dir, name] = [path.slice(0, path.indexOf('/')), path.slice(path.indexOf('/') + 1)];
+    const pkg = PACKAGES.find(entry => entry.dir === dir);
+    if (pkg) byURL.set(pkg.cdn + name, file);
+  }
   const original = self.fetch.bind(self);
   self.fetch = (input, init) => {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
-    if (!url.startsWith(VIRTUAL)) return original(input, init);
-    const file = files.get(decodeURIComponent(url.slice(VIRTUAL.length)));
-    if (!file) return Promise.reject(new Error('内置编译器缺少文件：' + url.slice(VIRTUAL.length)));
+    const file = byURL.get(decodeURIComponent(url));
+    if (!file) return original(input, init);
     // The Content-Type is what lets WebAssembly.instantiateStreaming take the fast path.
     return Promise.resolve(new Response(file, { headers: { 'Content-Type': MIME(url) } }));
   };
@@ -330,17 +423,45 @@ export async function loadToolchain() {
   if (loaded) return loaded;
   const status = await toolchainStatus();
   if (status !== 'ready') throw new ToolchainError(status, MESSAGE[status] || '内置编译器还没有准备好。');
-  const saved = await savedDirectory();
-  const files = await readToolchain(await saved.dir.getDirectoryHandle(TOOLCHAIN_FOLDER));
+  const current = await currentStore();
+  if (!current) throw new ToolchainError('absent', MESSAGE.absent);
+  const files = await readToolchain(current.store);
   patchFetch(files);
   const urls = await buildGraph(files);
-  const module = await import(urls.get(ENTRY));
+  const local = { compile: null, wasiURL: urls.get('wasi/wasi.js'), fsURL: urls.get('wasi/fs_mem.js'), via: 'files' };
+  let module;
+  try {
+    module = await import(urls.get(ENTRY));
+  } catch (error) {
+    // Moodle pages commonly send a Content-Security-Policy that allows https: but not
+    // blob:, and then no blob module can be imported at all. The glue is only ~150 KB,
+    // so it is fetched from the CDN while the 70 MB of wasm and sysroot keep coming
+    // from the folder - the requests those two make are answered from disk either way.
+    try { module = await import(PACKAGES[0].cdn + 'index.js'); }
+    catch { throw new ToolchainError('script-blocked', '这段页面不允许加载本地脚本（' + String(error && error.message || error).slice(0, 120) + '），从网络加载也失败了。'); }
+    local.via = 'cdn-glue';
+    local.wasiURL = PACKAGES[1].cdn + 'wasi.js';
+    local.fsURL = PACKAGES[1].cdn + 'fs_mem.js';
+  }
   if (typeof module.compile !== 'function') throw new Error('内置编译器没有导出 compile()。');
-  loaded = { compile: module.compile, wasiURL: urls.get('wasi/wasi.js'), fsURL: urls.get('wasi/fs_mem.js') };
+  loaded = { compile: module.compile, wasiURL: local.wasiURL, fsURL: local.fsURL, via: local.via };
   return loaded;
 }
 
+/**
+ * True when the page's Content-Security-Policy refuses to compile WebAssembly.
+ *
+ * There is no way around this one from inside the page: without 'wasm-unsafe-eval' no
+ * compiler written in wasm can run here at all. Naming it beats showing a raw
+ * CompileError, and the honest advice is the online compiler.
+ */
+export function wasmRefused(error) {
+  const text = String(error && error.message || error);
+  return /WebAssembly/i.test(text) && /Content Security policy|unsafe-eval/i.test(text);
+}
 export const MESSAGE = {
+  'script-blocked': '页面的安全策略不允许加载本地脚本。',
+  'wasm-blocked': '这个页面不允许在本机编译 WebAssembly。',
   unsupported: '这个浏览器装不了内置编译器。',
   absent: '还没有准备好编译器文件。',
   'needs-permission': '需要重新允许访问编译器文件夹。',
