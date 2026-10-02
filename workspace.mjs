@@ -640,6 +640,24 @@ function compileWarnStrip(){
   return '<details class="compile-warn-strip"><summary><span class="severity-dot"></span><b>编译器警告 '+issues.length+' 条</b><small>'+
     esc(issues[0].title)+(issues.length>1?' 等':'')+'</small></summary><div class="compile-issues">'+issueCardsHTML(issues)+'</div></details>';
 }
+/**
+ * The judge does not always compile what is on screen.
+ *
+ * A result can belong to an earlier submission, and a selected source file is submitted
+ * instead of the editor - so a compile error can be about code the learner is no longer
+ * looking at. Naming the difference is the only way to read that error correctly.
+ */
+function resultMismatch(r){
+  const lines=value=>String(value||'').replace(/\r\n/g,'\n');
+  const judged=typeof r.submittedCode==='string'?r.submittedCode:null;
+  const changed=judged!==null&&lines(judged)!==lines(code());
+  if(!changed&&!r.uploadedFile)return '';
+  return '<div class="result-warning">'+
+    (r.uploadedFile?'这次提交带的是源文件 <b>'+esc(r.uploadedFile)+'</b>，判题机编译的是它。':'')+
+    (changed?'这条结果对应的代码和编辑器里现在的不一样：提交时 '+lines(judged).split('\n').length+' 行，现在 '+lines(code()).split('\n').length+' 行。':'')+
+    (judged!==null?' '+button('show-submitted','看看提交的那份'):'')+
+    '</div>';
+}
 function renderResults() {
   stopWithin($('[data-bottom-body]'));
   const r=current.result;
@@ -654,6 +672,7 @@ function renderResults() {
   $('[data-bottom-body]').innerHTML=`<section class="results">
     <div class="result-title ${good?'green':r.pending?'muted':'red'}">${good?'通过':r.compile?'编译错误':r.pending?'判题中':r.total?'未通过':'暂无结果'}<small>${r.total?`${r.passed} / ${r.total} 个用例通过`:esc(r.message)}</small></div>
     ${r.source==='previous'?'<p class="result-warning">以下为此前提交的结果，不能代表当前编辑器中的代码。</p>':''}
+    ${resultMismatch(r)}
     ${compileWarnHTML()}
     <div class="result-assist">${button('tutor-diagnose','分析这次结果','ai','purple')}</div>
     ${r.submitId?`<div class="submission-id">提交 #${esc(r.submitId)}</div>`:''}
@@ -728,8 +747,19 @@ async function loadExercise(viewURL, push=true) {
     $('[data-language]').value=nativeCompiler.value;
     $('[data-file-slot]').replaceChildren();
     const file=form.querySelector('input[type=file]');
-    if(file){file.setAttribute('aria-label','源文件');$('[data-file-slot]').append(file);}
-    $('[data-attachment]').classList.add('hidden');
+    if(file){
+      file.setAttribute('aria-label','源文件');
+      $('[data-file-slot]').append(file);
+      // A selected file is submitted instead of the editor, so it must never be hidden
+      // while it is still attached - that is how a compile error ends up describing code
+      // the learner cannot see.
+      file.onchange=()=>{
+        const picked=!!(file.files&&file.files.length);
+        $('[data-attachment]').classList.toggle('hidden',!picked);
+        if(picked)toast('提交时会优先用这个文件，判题机编译的不是编辑器里的代码。');
+      };
+    }
+    $('[data-attachment]').classList.toggle('hidden',!file||!file.files||!file.files.length);
     $('[data-course]').textContent=text(viewDoc.querySelector('title')).split(':')[0] || '编程练习';
     $('[data-sample-count]').textContent=`${problem.tests.length} 个公开样例`;
     $('[data-position]').textContent=currentIndex>=0?`${currentIndex+1}/${problems.length}`:'';
@@ -2540,6 +2570,14 @@ async function handleClick(event) {
       t.mode=t.mode==='skip'?'all':'skip';
       t.cursor=0;
       traceGoto(0);
+      return;
+    }
+    case 'show-submitted':{
+      const judged=current?.result?.submittedCode;
+      if(typeof judged!=='string')return toast('没有留到这次提交的代码。');
+      openModal('<header><h2>判题机实际编译的代码<small class="version-tag">'+judged.split('\n').length+' 行</small></h2><button data-close aria-label="关闭">'+icon('close')+'</button></header>'+
+        '<p class="hint">这是提交到 Moodle 的那一份。编译错误里的行号都是对着它算的。</p>'+
+        '<pre class="submitted-code">'+esc(judged)+'</pre>');
       return;
     }
     case 'export':return openExport();
