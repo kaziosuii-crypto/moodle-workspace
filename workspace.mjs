@@ -370,6 +370,7 @@ function setBusy(value) {
   const progress=$('.work-progress');progress.classList.toggle('hidden',!value);
   if(value)busyMotion=motion(progress,{scaleX:[.08,.96],opacity:[.5,1],duration:1800,alternate:true,loop:true,ease:'inOutSine'});
   $$('[data-action=submit],[data-action=run],[data-action=prev],[data-action=next],[data-action=problems]').forEach(b=>b.disabled=value);
+  $$('[data-action=run],[data-action=submit]').forEach(b=>{const l=b.querySelector('.button-label');if(l&&!b.dataset.idleLabel)b.dataset.idleLabel=l.textContent;});
   if (!value) {
     $('[data-action=prev]').disabled=currentIndex<=0;
     $('[data-action=next]').disabled=currentIndex<0 || currentIndex>=problems.length-1;
@@ -1310,6 +1311,7 @@ async function submit() {
   if(busy)return;
   if(!code().trim() && !$('[data-file-slot] input')?.files.length){toast('请先编写代码或选择源文件');return;}
   setBusy(true);saveDraft();
+  actProgress('submit',0.06,'提交中…');
   current.result={rows:[],total:0,passed:0,pending:true,message:'正在提交…'};switchBottom('results');
   try {
     const before=await newestSubmissionId();
@@ -1321,6 +1323,7 @@ async function submit() {
     const response=await requestDoc(current.submitURL,{method:'POST',body:data});
     const error=response.querySelector('.errorbox,.notifyproblem');
     if(error)throw new Error(text(error));
+    actProgress('submit',0.3,'等待判题…');
     // Wait for the new submission to appear in the history list, then read the result for
     // that exact id. Deterministic whether judging is instant or queued, and whether the
     // page is served directly or through a path-prefix proxy.
@@ -1329,23 +1332,28 @@ async function submit() {
       if(attempt)await new Promise(r=>setTimeout(r,1500));
       submitId=await newestSubmissionId();
       if(submitId && submitId!==before)break;
+      actProgress('submit',Math.min(0.6,0.3+attempt*0.02),'等待判题…');
     }
     if(!submitId || submitId===before)throw new Error('未能确认本次提交，请在提交历史中查看结果。');
     const resultURL=activity('result.php')+'&submitid='+encodeURIComponent(submitId);
     let result=parseResult(await requestDoc(resultURL),resultURL);
     for(let attempt=0;attempt<40 && !(result.finished && !result.pending);attempt++){
       await new Promise(r=>setTimeout(r,1500));
+      actProgress('submit',Math.min(0.92,0.62+attempt*0.012),'判题中…');
       result=parseResult(await requestDoc(resultURL),resultURL);
     }
     if(result.finished && !result.pending){
       // Same treatment as a local build: the diagnostics become cards and editor marks.
       current.result={...adoptJudgeResult(result),submitId,source:'submitted',submittedCode:data.get('code'),uploadedFile:file?.name||''};
       switchBottom('results');
+      const verdict=current.result;
+      actFinish('submit',verdict.total&&verdict.passed===verdict.total?'全部通过':(verdict.total?verdict.passed+'/'+verdict.total+' 通过':'已提交'),!!(verdict.total&&verdict.passed===verdict.total));
       return;
     }
     current.result={rows:[],total:0,pending:true,message:'尚未确认本次判题结果，请稍后刷新。'};switchBottom('results');
   } catch(e) {
     current.result={rows:[],total:0,message:e.message,compile:false};switchBottom('results');toast(e.message);
+    actFinish('submit','提交失败',false);
   } finally {setBusy(false);}
 }
 // Built-in online compiler: Wandbox is a long-running public playground with
@@ -2554,9 +2562,63 @@ async function maybeOfferToolchain(){
   const status=await toolchainStatus();
   if(status==='ready'||status==='unsupported')return;
 }
+/* ------------------------------------------------- 按钮里的进度（Modrinth 那种） --
+ * Modrinth's download button does the whole thing inside itself: the fill sweeps across
+ * the button, the phrase cross-fades from "Preparing" to "Downloading", and a percentage
+ * rides along. 运行 and 提交 do the same here, so progress is where the learner is already
+ * looking instead of in a second bar somewhere else on the page.
+ */
+function actNode(which){ return $('[data-action="'+which+'"]'); }
+function actLabel(node){ return node ? node.querySelector('.button-label') : null; }
+function actFill(node){
+  let fill=node.querySelector('.act-fill');
+  if(!fill){ fill=document.createElement('span'); fill.className='act-fill'; node.prepend(fill); }
+  let pct=node.querySelector('.act-pct');
+  if(!pct){ pct=document.createElement('span'); pct.className='act-pct'; node.append(pct); }
+  return {fill:fill,pct:pct};
+}
+/** The phrase swaps with a short fade, the way Modrinth swaps its download phrases. */
+function actPhrase(node,text){
+  const label=actLabel(node);
+  if(!label||label.textContent===text)return;
+  label.style.opacity='0';
+  clearTimeout(node._actPhrase);
+  node._actPhrase=setTimeout(function(){label.textContent=text;label.style.opacity='1';},110);
+}
+function actProgress(which,fraction,phrase){
+  const node=actNode(which);
+  if(!node)return;
+  const p=Math.max(0,Math.min(1,Number(fraction)||0));
+  node.classList.add('acting');
+  node.style.setProperty('--p',String(p));
+  const parts=actFill(node);
+  if(phrase)actPhrase(node,phrase);
+  parts.pct.textContent=p>=0.999?'':Math.round(p*100)+'%';
+}
+function actFinish(which,phrase,ok){
+  const node=actNode(which);
+  if(!node)return;
+  actProgress(which,1,phrase);
+  node.classList.toggle('act-ok',ok!==false);
+  node.classList.toggle('act-bad',ok===false);
+  clearTimeout(node._actTimer);
+  node._actTimer=setTimeout(function(){actReset(which);},1600);
+}
+function actReset(which){
+  const node=actNode(which);
+  if(!node)return;
+  clearTimeout(node._actTimer);clearTimeout(node._actPhrase);
+  node.classList.remove('acting','act-ok','act-bad');
+  node.style.removeProperty('--p');
+  const label=actLabel(node);
+  if(label){ label.textContent=node.dataset.idleLabel||(which==='run'?'运行':'提交'); label.style.opacity='1'; }
+  const pct=node.querySelector('.act-pct'); if(pct)pct.remove();
+  const fill=node.querySelector('.act-fill'); if(fill)fill.remove();
+}
 async function runTests() {
   if(busy)return;
   setBusy(true);saveDraft();current.compileIssues=[];syncDiagnosis();
+  actProgress('run',0.03,'准备中…');
   try {
     // Compile and run what the judge compiles; the submission still carries only the
     // learner's own part, because the prefix is sent by Moodle itself.
@@ -2573,7 +2635,10 @@ async function runTests() {
       results=data.results;
     }else{
       // Local WASM compiler first; fall back to the online playground if it cannot load.
-      const onProgress=message=>{current.result={rows:[],total:0,pending:true,message};switchBottom('results');};
+      const onProgress=(fraction,text)=>{
+        actProgress('run',0.05+0.3*Math.min(1,Number(fraction)||0),text||'正在准备编译器…');
+        current.result={rows:[],total:0,pending:true,message:text||'正在准备编译器…'};switchBottom('results');
+      };
       let module=null;
       // 在线编译器模式：用户明确选过它，就不再打扰。
       if(!read(ONLINE_ONLY,false)){
@@ -2588,7 +2653,7 @@ async function runTests() {
           if(/undefined symbol|duplicate symbol|cannot find -l|wasm-ld:|collect2:|ld returned/i.test(error.message))throw error;
           // No folder yet, or a permission that lapsed: that is a question for the
           // learner, not a reason to quietly send their code to a public compiler.
-          if(handleToolchainError(error,()=>runTests()))return;
+          if(handleToolchainError(error,()=>runTests())){actReset('run');return;}
           // Keep the whole reason: the toast only has room for the first 60 characters,
           // and "the built-in compiler failed" is useless without them.
           console.warn('内置编译器不可用：'+(error&&error.stack||error));
@@ -2598,6 +2663,7 @@ async function runTests() {
       results=[];
       for(let index=0;index<tests.length;index++){
         const test=tests[index];
+        actProgress('run',0.38+0.58*(index/tests.length),'用例 '+(index+1)+'/'+tests.length);
         try{
           results.push(module?await runCModule(module,test.input):await runOnline(submittedSource,test.input));
         }catch(error){
@@ -2621,9 +2687,13 @@ async function runTests() {
     // Warnings from the build come first: they are about the code, not about a case.
     current.compileIssues=parseCompileIssues([compileWarnings].concat(results.map(r=>String(r.stderr||''))).join('\n'));
     switchBottom('results');syncDiagnosis();
+    const allPassed=rows.length>0&&rows.every(r=>r.passed);
+    actFinish('run',allPassed?'全部通过':(rows.filter(r=>r.passed).length+'/'+rows.length+' 通过'),allPassed);
   } catch(error){
     current.compileIssues=parseCompileIssues(error.message);
-    current.result={rows:[],total:0,passed:0,message:error.message,compile:/error:|错误|compiler/i.test(error.message)};switchBottom('results');syncDiagnosis();throw error;
+    current.result={rows:[],total:0,passed:0,message:error.message,compile:/error:|错误|compiler/i.test(error.message)};switchBottom('results');syncDiagnosis();
+    actFinish('run','运行失败',false);
+    throw error;
   } finally{setBusy(false);}
 }
 /** Jump the editor to a line the compiler complained about. */
