@@ -20,6 +20,7 @@ const GIT = ['C:\\Program Files\\Git\\cmd\\git.exe', 'C:\\Program Files\\Git\\bi
 if (!GIT) { console.error('git not found'); process.exit(1); }
 
 const pkg = JSON.parse(await readFile('package.json', 'utf8'));
+let publishedSha = '';
 const AUTHOR = REPO.author || 'moodle-workspace';
 const EMAIL = (REPO.github.user || REPO.gitee.user || 'noreply') + '@users.noreply.github.com';
 
@@ -42,6 +43,7 @@ async function api(url, options) {
  * updates, which looks exactly like "版本没发上去". The API writes the same commit.
  */
 async function commitThroughApi(u, r, token) {
+  const out = { ok: false, sha: '' };
   const head = { Authorization: 'token ' + token, Accept: 'application/vnd.github+json' };
   const path = 'code.user.js';
   const content = await readFile(path);
@@ -49,9 +51,14 @@ async function commitThroughApi(u, r, token) {
   const body = { message: 'release ' + pkg.version, content: content.toString('base64'), branch: 'main' };
   if (current.ok && current.body && current.body.sha) body.sha = current.body.sha;
   const put = await api('https://api.github.com/repos/' + u + '/' + r + '/contents/' + path, { method: 'PUT', headers: head, body: JSON.stringify(body) });
-  if (put.ok) { console.log('github commit: ok ' + String(put.body && put.body.commit && put.body.commit.sha || '').slice(0, 7)); return true; }
+  if (put.ok) {
+    out.ok = true;
+    out.sha = String((put.body && put.body.commit && put.body.commit.sha) || '');
+    console.log('github commit: ok ' + out.sha.slice(0, 7));
+    return out;
+  }
   console.log('github commit: FAILED ' + put.status + ' ' + JSON.stringify(put.body).slice(0, 200));
-  return false;
+  return out;
 }
 
 // ------------------------------------------------------------------ local --
@@ -71,7 +78,7 @@ if (REPO.github.user && ghToken) {
   let pushed = false;
   try { git(['push', '--quiet', '--force', 'https://' + u + ':' + ghToken + '@github.com/' + u + '/' + r + '.git', 'HEAD:main']); pushed = true; }
   catch { console.log('github push通过 git 失败（网络重置？），改用 REST API 提交…'); }
-  if (!pushed) pushed = await commitThroughApi(u, r, ghToken);
+  if (!pushed) { const done = await commitThroughApi(u, r, ghToken); pushed = !!done.ok; publishedSha = done.sha || ''; }
   if (!pushed) console.log('github FAILED — git 和 API 都没成功，油猴脚本不会更新。');
   // Tag every release so version-pinned jsDelivr URLs also resolve.
   try { git(['tag', '-f', 'v' + pkg.version]); git(['push', '--quiet', '--force', 'https://' + u + ':' + ghToken + '@github.com/' + u + '/' + r + '.git', 'refs/tags/v' + pkg.version]); } catch { console.log('tag push skipped'); }
@@ -93,6 +100,29 @@ if (REPO.gitee.user && gtToken) {
   catch { console.log('gitee push FAILED — create the repo at https://gitee.com/projects/new first (name: ' + r + ', 开源), then run publish.mjs again.'); }
   console.log('gitee: https://gitee.com/' + u + '/' + r);
 } else console.log('gitee: skipped (need REPO.gitee.user and GITEE_TOKEN)');
+
+// ------------------------------------------------------------ verification --
+// The raw CDN caches "main" for a few minutes, and a release that never reached the
+// remote is invisible in this script's own output: it says "done" either way. So the
+// published file is read back - from a commit-pinned URL, which is never stale.
+if (REPO.github.user) {
+  const u = REPO.github.user, r = REPO.github.repo;
+  const pinned = publishedSha || gitQuiet(['rev-parse', 'HEAD']);
+  const readVersion = async (url) => {
+    try {
+      const response = await fetch(url, { headers: { 'User-Agent': 'moodle-workspace' } });
+      if (!response.ok) return 'HTTP ' + response.status;
+      const text = await response.text();
+      const found = /@version\s+(\S+)/.exec(text);
+      return found ? found[1] : 'no @version';
+    } catch (error) { return 'unreachable'; }
+  };
+  const exact = await readVersion('https://raw.githubusercontent.com/' + u + '/' + r + '/' + pinned + '/code.user.js');
+  const cached = await readVersion('https://raw.githubusercontent.com/' + u + '/' + r + '/main/code.user.js?x=' + Date.now());
+  console.log('remote file at ' + String(pinned).slice(0, 7) + ' says: ' + exact + (exact === pkg.version ? '  ✓ 已发布' : '  ✗ 和 package.json 的 ' + pkg.version + ' 不一致'));
+  console.log('raw main (CDN 缓存) says: ' + cached + (cached === pkg.version ? '  ✓ 缓存已刷新' : '  … 缓存未刷新，油猴要等几分钟或手动「检查更新」'));
+  if (exact !== pkg.version) console.log('发布没有真正落地，请在网络恢复后重新执行 node publish.mjs');
+}
 
 console.log('current branch: ' + gitQuiet(['rev-parse', '--abbrev-ref', 'HEAD']));
 console.log('done');
