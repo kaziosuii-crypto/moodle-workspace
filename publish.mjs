@@ -34,6 +34,26 @@ async function api(url, options) {
   return { ok: response.ok, status: response.status, body };
 }
 
+/**
+ * Commit code.user.js through the contents API.
+ *
+ * On a locked-down network "git push" to github.com can be reset while api.github.com is
+ * untouched - the releases then sit in the local repository and the userscript never
+ * updates, which looks exactly like "版本没发上去". The API writes the same commit.
+ */
+async function commitThroughApi(u, r, token) {
+  const head = { Authorization: 'token ' + token, Accept: 'application/vnd.github+json' };
+  const path = 'code.user.js';
+  const content = await readFile(path);
+  const current = await api('https://api.github.com/repos/' + u + '/' + r + '/contents/' + path, { headers: head });
+  const body = { message: 'release ' + pkg.version, content: content.toString('base64'), branch: 'main' };
+  if (current.ok && current.body && current.body.sha) body.sha = current.body.sha;
+  const put = await api('https://api.github.com/repos/' + u + '/' + r + '/contents/' + path, { method: 'PUT', headers: head, body: JSON.stringify(body) });
+  if (put.ok) { console.log('github commit: ok ' + String(put.body && put.body.commit && put.body.commit.sha || '').slice(0, 7)); return true; }
+  console.log('github commit: FAILED ' + put.status + ' ' + JSON.stringify(put.body).slice(0, 200));
+  return false;
+}
+
 // ------------------------------------------------------------------ local --
 if (!existsSync('.git')) { console.log('git init'); git(['init', '-b', 'main']); }
 git(['add', '-A']);
@@ -48,8 +68,11 @@ if (REPO.github.user && ghToken) {
     body: JSON.stringify({ name: r, description: 'Moodle 编程工作区（油猴脚本）', private: false, has_issues: true, auto_init: false }) });
   console.log('github repo: ' + (made.ok ? 'created' : made.status === 422 ? 'already exists' : 'FAILED ' + JSON.stringify(made.body).slice(0, 200)));
   // Never let one platform abort the other, and never echo the token in an error.
-  try { git(['push', '--quiet', '--force', 'https://' + u + ':' + ghToken + '@github.com/' + u + '/' + r + '.git', 'HEAD:main']); }
-  catch { console.log('github push FAILED — create the repo at https://github.com/new first (name: ' + r + ', public, no README), then run publish.mjs again.'); }
+  let pushed = false;
+  try { git(['push', '--quiet', '--force', 'https://' + u + ':' + ghToken + '@github.com/' + u + '/' + r + '.git', 'HEAD:main']); pushed = true; }
+  catch { console.log('github push通过 git 失败（网络重置？），改用 REST API 提交…'); }
+  if (!pushed) pushed = await commitThroughApi(u, r, ghToken);
+  if (!pushed) console.log('github FAILED — git 和 API 都没成功，油猴脚本不会更新。');
   // Tag every release so version-pinned jsDelivr URLs also resolve.
   try { git(['tag', '-f', 'v' + pkg.version]); git(['push', '--quiet', '--force', 'https://' + u + ':' + ghToken + '@github.com/' + u + '/' + r + '.git', 'refs/tags/v' + pkg.version]); } catch { console.log('tag push skipped'); }
   await api('https://purge.jsdelivr.net/gh/' + u + '/' + r + '@main/code.user.js', { method: 'GET' }).catch(() => {});
