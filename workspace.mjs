@@ -389,6 +389,16 @@ function mount() {
       <div class="topgroup actions">${button('run','运行','run','run','运行自定义用例（需要执行 API）')}${button('submit','提交','submit','primary','提交至 Moodle 判题（Ctrl + Enter）')}${button('complete','','ai','purple','AI 补全（Ctrl + I）')}${button('settings','','settings','mobile-settings','设置')}</div>
       <div class="topgroup end"><span class="muted optional" title="当前脚本版本" style="font-size:11px">v${__SCRIPT_VERSION__}</span><span class="divider optional"></span>${button('settings','','settings','square','编辑器与 AI 设置')}${button('more','','more','square','更多功能')}</div>
     </header><div class="work-progress hidden" role="progressbar" aria-label="正在处理请求"></div>
+    <div class="screen-busy hidden" data-screen-busy role="status" aria-live="polite">
+      <div class="sb-card">
+        <div class="sb-ring">
+          <svg viewBox="0 0 120 120" aria-hidden="true"><circle class="sb-track" cx="60" cy="60" r="52"/><circle class="sb-bar" data-sb-ring cx="60" cy="60" r="52"/></svg>
+          <span class="sb-pct" data-sb-pct>0%</span>
+          <svg class="sb-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12.5 9.8 17.8 19.5 6.5"/></svg>
+        </div>
+        <div class="sb-copy"><strong data-sb-phrase>准备中…</strong><small data-sb-note></small></div>
+      </div>
+    </div>
     <main class="workspace">
       <section class="panel left">
         <nav class="panel-head" role="tablist">
@@ -1311,7 +1321,7 @@ async function submit() {
   if(busy)return;
   if(!code().trim() && !$('[data-file-slot] input')?.files.length){toast('请先编写代码或选择源文件');return;}
   setBusy(true);saveDraft();
-  actProgress('submit',0.06,'提交中…');
+  actProgress('submit',0.06,'提交中…','正在把代码发给 Moodle');
   current.result={rows:[],total:0,passed:0,pending:true,message:'正在提交…'};switchBottom('results');
   try {
     const before=await newestSubmissionId();
@@ -1323,7 +1333,7 @@ async function submit() {
     const response=await requestDoc(current.submitURL,{method:'POST',body:data});
     const error=response.querySelector('.errorbox,.notifyproblem');
     if(error)throw new Error(text(error));
-    actProgress('submit',0.3,'等待判题…');
+    actProgress('submit',0.3,'等待判题…','代码已提交，等判题机接手');
     // Wait for the new submission to appear in the history list, then read the result for
     // that exact id. Deterministic whether judging is instant or queued, and whether the
     // page is served directly or through a path-prefix proxy.
@@ -1332,14 +1342,14 @@ async function submit() {
       if(attempt)await new Promise(r=>setTimeout(r,1500));
       submitId=await newestSubmissionId();
       if(submitId && submitId!==before)break;
-      actProgress('submit',Math.min(0.6,0.3+attempt*0.02),'等待判题…');
+      actProgress('submit',Math.min(0.6,0.3+attempt*0.02),'等待判题…','正在提交记录里找这一次');
     }
     if(!submitId || submitId===before)throw new Error('未能确认本次提交，请在提交历史中查看结果。');
     const resultURL=activity('result.php')+'&submitid='+encodeURIComponent(submitId);
     let result=parseResult(await requestDoc(resultURL),resultURL);
     for(let attempt=0;attempt<40 && !(result.finished && !result.pending);attempt++){
       await new Promise(r=>setTimeout(r,1500));
-      actProgress('submit',Math.min(0.92,0.62+attempt*0.012),'判题中…');
+      actProgress('submit',Math.min(0.92,0.62+attempt*0.012),'判题中…','正在读取判题结果');
       result=parseResult(await requestDoc(resultURL),resultURL);
     }
     if(result.finished && !result.pending){
@@ -2562,22 +2572,50 @@ async function maybeOfferToolchain(){
   const status=await toolchainStatus();
   if(status==='ready'||status==='unsupported')return;
 }
-/* ------------------------------------------------- 按钮里的进度（Modrinth 那种） --
- * Modrinth's download button does the whole thing inside itself: the fill sweeps across
- * the button, the phrase cross-fades from "Preparing" to "Downloading", and a percentage
- * rides along. 运行 and 提交 do the same here, so progress is where the learner is already
- * looking instead of in a second bar somewhere else on the page.
+/* --------------------------------------------- 全屏进度（Modrinth 那种下载动画） --
+ * The whole screen carries it: a ring that fills, the phase phrase cross-fading under it,
+ * the percentage in the middle, and a tick that draws itself when it is done. 运行 and 提交
+ * both drive it, so a long compile or a slow judge never leaves the learner wondering
+ * whether the click registered. It sits below the dialogs, so setting the toolchain up
+ * still comes to the front.
  */
+let screenPhraseTimer=null;
+const RING=326.7;
+function screenBusy(which,fraction,phrase,note){
+  const box=$('[data-screen-busy]');
+  if(!box)return;
+  const p=Math.max(0,Math.min(1,Number(fraction)||0));
+  box.classList.remove('hidden','sb-done','sb-bad');
+  box.dataset.sb=which;
+  const ring=$('[data-sb-ring]');
+  if(ring)ring.style.strokeDashoffset=String(RING*(1-p));
+  const pct=$('[data-sb-pct]');
+  if(pct)pct.textContent=Math.round(p*100)+'%';
+  const label=$('[data-sb-phrase]');
+  if(label&&phrase&&label.textContent!==phrase){
+    label.style.opacity='0';
+    clearTimeout(screenPhraseTimer);
+    screenPhraseTimer=setTimeout(function(){label.textContent=phrase;label.style.opacity='1';},110);
+  }
+  const small=$('[data-sb-note]');
+  if(small&&note!==undefined)small.textContent=note;
+}
+function screenDone(which,phrase,ok){
+  const box=$('[data-screen-busy]');
+  if(!box)return;
+  screenBusy(which,1,phrase,'');
+  box.classList.add(ok===false?'sb-bad':'sb-done');
+  setTimeout(screenHide,1000);
+}
+function screenHide(){
+  const box=$('[data-screen-busy]');
+  if(!box)return;
+  box.classList.add('hidden');
+  box.classList.remove('sb-done','sb-bad');
+}
 function actNode(which){ return $('[data-action="'+which+'"]'); }
 function actLabel(node){ return node ? node.querySelector('.button-label') : null; }
-function actFill(node){
-  let fill=node.querySelector('.act-fill');
-  if(!fill){ fill=document.createElement('span'); fill.className='act-fill'; node.prepend(fill); }
-  let pct=node.querySelector('.act-pct');
-  if(!pct){ pct=document.createElement('span'); pct.className='act-pct'; node.append(pct); }
-  return {fill:fill,pct:pct};
-}
-/** The phrase swaps with a short fade, the way Modrinth swaps its download phrases. */
+/** The phrase in the button swaps with the same short fade as the one on the screen. */
 function actPhrase(node,text){
   const label=actLabel(node);
   if(!label||label.textContent===text)return;
@@ -2585,40 +2623,32 @@ function actPhrase(node,text){
   clearTimeout(node._actPhrase);
   node._actPhrase=setTimeout(function(){label.textContent=text;label.style.opacity='1';},110);
 }
-function actProgress(which,fraction,phrase){
+function actProgress(which,fraction,phrase,note){
   const node=actNode(which);
-  if(!node)return;
-  const p=Math.max(0,Math.min(1,Number(fraction)||0));
-  node.classList.add('acting');
-  node.style.setProperty('--p',String(p));
-  const parts=actFill(node);
-  if(phrase)actPhrase(node,phrase);
-  parts.pct.textContent=p>=0.999?'':Math.round(p*100)+'%';
+  if(node&&phrase)actPhrase(node,phrase);
+  screenBusy(which,fraction,phrase,note);
 }
 function actFinish(which,phrase,ok){
   const node=actNode(which);
-  if(!node)return;
-  actProgress(which,1,phrase);
-  node.classList.toggle('act-ok',ok!==false);
-  node.classList.toggle('act-bad',ok===false);
-  clearTimeout(node._actTimer);
-  node._actTimer=setTimeout(function(){actReset(which);},1600);
+  if(node)actPhrase(node,phrase);
+  screenDone(which,phrase,ok);
+  clearTimeout(node&&node._actTimer);
+  if(node)node._actTimer=setTimeout(function(){actReset(which);},2400);
 }
 function actReset(which){
   const node=actNode(which);
-  if(!node)return;
-  clearTimeout(node._actTimer);clearTimeout(node._actPhrase);
-  node.classList.remove('acting','act-ok','act-bad');
-  node.style.removeProperty('--p');
-  const label=actLabel(node);
-  if(label){ label.textContent=node.dataset.idleLabel||(which==='run'?'运行':'提交'); label.style.opacity='1'; }
-  const pct=node.querySelector('.act-pct'); if(pct)pct.remove();
-  const fill=node.querySelector('.act-fill'); if(fill)fill.remove();
+  if(node){
+    clearTimeout(node._actTimer);clearTimeout(node._actPhrase);
+    node.classList.remove('acting');
+    const label=actLabel(node);
+    if(label){ label.textContent=node.dataset.idleLabel||(which==='run'?'运行':'提交'); label.style.opacity='1'; }
+  }
+  screenHide();
 }
 async function runTests() {
   if(busy)return;
   setBusy(true);saveDraft();current.compileIssues=[];syncDiagnosis();
-  actProgress('run',0.03,'准备中…');
+  actProgress('run',0.03,'准备中…','正在准备编译器');
   try {
     // Compile and run what the judge compiles; the submission still carries only the
     // learner's own part, because the prefix is sent by Moodle itself.
@@ -2636,7 +2666,7 @@ async function runTests() {
     }else{
       // Local WASM compiler first; fall back to the online playground if it cannot load.
       const onProgress=(fraction,text)=>{
-        actProgress('run',0.05+0.3*Math.min(1,Number(fraction)||0),text||'正在准备编译器…');
+        actProgress('run',0.05+0.3*Math.min(1,Number(fraction)||0),text||'正在准备编译器…','内置编译器只在你点运行时才启动');
         current.result={rows:[],total:0,pending:true,message:text||'正在准备编译器…'};switchBottom('results');
       };
       let module=null;
@@ -2663,7 +2693,7 @@ async function runTests() {
       results=[];
       for(let index=0;index<tests.length;index++){
         const test=tests[index];
-        actProgress('run',0.38+0.58*(index/tests.length),'用例 '+(index+1)+'/'+tests.length);
+        actProgress('run',0.38+0.58*(index/tests.length),'用例 '+(index+1)+'/'+tests.length,'输入 '+(test.input||'').trim().split('\n')[0].slice(0,40));
         try{
           results.push(module?await runCModule(module,test.input):await runOnline(submittedSource,test.input));
         }catch(error){
