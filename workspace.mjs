@@ -907,9 +907,20 @@ async function switchLeft(tab) {
   replaceContent($('[data-left-body]'),loadingHTML('正在读取提交记录'));
   animateLoading($('[data-left-body]'));
   const id=current.id;
-  const doc=await requestDoc(activity('history.php'));
+  let doc;
+  try { doc=await historyDoc(); }
+  catch(error){
+    // A failed request used to leave this panel spinning forever with no way to tell a
+    // dead session from an empty list. Say what happened, and offer the retry.
+    if(current.id!==id||activeLeft!=='history')return;
+    replaceContent($('[data-left-body]'),'<div class="empty">提交记录读取失败：'+esc(String(error&&error.message||error))+
+      '<br><small>请求地址：'+esc(activity('history.php'))+'</small></div><div class="case-toolbar"><button data-action="left-history">重试</button></div>');
+    return;
+  }
   if (current.id!==id || activeLeft!=='history') return;
-  const entries=[...doc.querySelectorAll('#submitlist a[submitid]')];
+  // #submitlist is where this plugin puts them, but the direct intranet serves a slightly
+  // different page, so any submitid link counts.
+  const entries=[...doc.querySelectorAll('#submitlist a[submitid], a[submitid]')];
   replaceContent($('[data-left-body]'),`<div class="history"><h3>提交记录</h3>${entries.map(a=>{const url=esc(safeURL(a.getAttribute('href'),base));return `<div class="history-row"><button class="history-item" data-history="${url}"><span>${esc(text(a).replace(/-\s+(\d)/g,'-$1'))}</span><small>#${esc(a.getAttribute('submitid'))}</small></button><button class="history-paste" data-paste-history="${esc(url)}" title="把这次提交的代码放进代码栏">${icon('code')}粘贴到代码栏</button></div>`;}).join('')||'<div class="empty">还没有提交记录</div>'}<div data-history-code></div></div>`);
 }
 async function loadExercise(viewURL, push=true) {
@@ -1308,8 +1319,32 @@ async function refreshResult(source='previous') {
   switchBottom('results');
 }
 /** Newest submission id from the history list; the same ?submitid= shape in intranet and proxied deployments. */
+/**
+ * The signed-in student's own user id, read out of the page's own links.
+ *
+ * On the intranet the plain history.php can come back showing a class-wide list (or none
+ * of the learner's attempts) unless userid is spelled out; behind WebVPN the same URL
+ * was enough. Asking for it explicitly works in both places.
+ */
+function signedInUserId(){
+  for(const a of document.querySelectorAll('a[href*="user/view.php"],a[href*="user/index.php"]')){
+    const found=/[?&]id=(\d+)/.exec(a.getAttribute('href')||'');
+    if(found)return found[1];
+  }
+  const field=document.querySelector('input[name="userid"],input[name="id"][type="hidden"]');
+  return field&&/^\d+$/.test(field.value||'')?field.value:'';
+}
+/** history.php for this activity, with the fallback the direct intranet needs. */
+async function historyDoc(){
+  const first=await requestDoc(activity('history.php'));
+  if(first.querySelector('a[submitid]'))return first;
+  const userid=signedInUserId();
+  if(!userid)return first;
+  const second=await requestDoc(activity('history.php')+'&userid='+encodeURIComponent(userid));
+  return second.querySelector('a[submitid]')?second:first;
+}
 async function newestSubmissionId() {
-  const doc=await requestDoc(activity('history.php'));
+  const doc=await historyDoc();
   const attr=[...doc.querySelectorAll('a[submitid]')].map(a=>a.getAttribute('submitid')).filter(Boolean);
   if(attr.length)return attr[0];
   for(const a of doc.querySelectorAll('a[href*="submitid="]')){
@@ -2901,6 +2936,7 @@ async function handleClick(event) {
       return;
     }
     case 'check-problems':problemCheckedFor=null;return runProblems();
+    case 'left-history':return switchLeft('history');
     case 'show-submitted':{
       const judged=current?.result?.submittedCode;
       if(typeof judged!=='string')return toast('没有留到这次提交的代码。');
