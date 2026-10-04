@@ -105,23 +105,23 @@ if (REPO.gitee.user && gtToken) {
 // The raw CDN caches "main" for a few minutes, and a release that never reached the
 // remote is invisible in this script's own output: it says "done" either way. So the
 // published file is read back - from a commit-pinned URL, which is never stale.
-if (REPO.github.user) {
+if (REPO.github.user && process.env.GITHUB_TOKEN) {
   const u = REPO.github.user, r = REPO.github.repo;
-  const pinned = publishedSha || gitQuiet(['rev-parse', 'HEAD']);
-  const readVersion = async (url) => {
-    try {
-      const response = await fetch(url, { headers: { 'User-Agent': 'moodle-workspace' } });
-      if (!response.ok) return 'HTTP ' + response.status;
-      const text = await response.text();
-      const found = /@version\s+(\S+)/.exec(text);
-      return found ? found[1] : 'no @version';
-    } catch (error) { return 'unreachable'; }
-  };
-  const exact = await readVersion('https://raw.githubusercontent.com/' + u + '/' + r + '/' + pinned + '/code.user.js');
-  const cached = await readVersion('https://raw.githubusercontent.com/' + u + '/' + r + '/main/code.user.js?x=' + Date.now());
-  console.log('remote file at ' + String(pinned).slice(0, 7) + ' says: ' + exact + (exact === pkg.version ? '  ✓ 已发布' : '  ✗ 和 package.json 的 ' + pkg.version + ' 不一致'));
-  console.log('raw main (CDN 缓存) says: ' + cached + (cached === pkg.version ? '  ✓ 缓存已刷新' : '  … 缓存未刷新，油猴要等几分钟或手动「检查更新」'));
-  if (exact !== pkg.version) console.log('发布没有真正落地，请在网络恢复后重新执行 node publish.mjs');
+  const head = { Authorization: 'token ' + process.env.GITHUB_TOKEN, Accept: 'application/vnd.github+json' };
+  // Read it back through the API rather than raw.githubusercontent.com: the API is what
+  // this script can actually reach here, and it never serves a cached copy.
+  const file = await api('https://api.github.com/repos/' + u + '/' + r + '/contents/code.user.js?ref=main', { headers: head });
+  let remote = '';
+  if (file.ok && file.body && file.body.sha) {
+    const blob = await api('https://api.github.com/repos/' + u + '/' + r + '/git/blobs/' + file.body.sha, { headers: head });
+    if (blob.ok && blob.body && blob.body.content) {
+      const text = Buffer.from(blob.body.content, 'base64').toString('utf8').slice(0, 500);
+      remote = (/@version\s+(\S+)/.exec(text) || [])[1] || 'no @version';
+    }
+  }
+  console.log('远端 main 上的版本：' + (remote || '读不到（' + file.status + '）') + (remote === pkg.version ? '  ✓ 已发布' : '  ✗ 与本地 ' + pkg.version + ' 不一致'));
+  if (remote && remote !== pkg.version) console.log('发布没有真正落地：请在网络恢复后重新执行 node publish.mjs');
+  console.log('油猴读的是 raw.githubusercontent.com 的 main，那层有几分钟 CDN 缓存；等一会儿或手动「检查更新」。');
 }
 
 console.log('current branch: ' + gitQuiet(['rev-parse', '--abbrev-ref', 'HEAD']));
